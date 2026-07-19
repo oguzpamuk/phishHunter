@@ -381,7 +381,7 @@ def render_text(report):
              f"Risk    : {s['risk_score']}/100 ({s['risk_level']})",
              "Findings:"]
     for f in report["findings"]:
-        lines.append(f"  [{f["severity"].upper():>8}] {f['code']}: "
+        lines.append(f"  [{f['severity'].upper():>8}] {f['code']}: "
                      f"{f['message']}")
     if not report["findings"]:
         lines.append("  (none)")
