@@ -267,4 +267,4 @@ Issues and PRs are welcome — new intel sources plug in cleanly as additional s
 
 ## 📄 License
 
-No license file is included yet — add one (e.g. MIT) before publishing if you intend the code to be reusable.
+Apache 2.0
