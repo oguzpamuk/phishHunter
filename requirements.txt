@@ -1,0 +1,6 @@
+# Threat-intel stage (ioc-orchestrator + individual reputation skills):
+requests>=2.28
+# PDF report generation (skills/email-triage-pipeline/scripts/report_to_pdf.py):
+reportlab>=4.0
+# Everything else — parser, header analyzer, anomaly detector, IOC extractor,
+# whois, and the pipeline itself — is pure Python standard library.
