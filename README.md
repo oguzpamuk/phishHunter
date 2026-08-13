@@ -32,6 +32,8 @@ Give it a suspicious `.eml` or `.msg` file — get back a full SOC-style investi
  │ SPF/DKIM/DMARC │ │ spam score,    │  │  │  --yara-rules) │ │  attachment SHA256 │
  │ spoofing,      │ │ brand          │  │  │ your rules vs. │ │                    │
  │ routing        │ │ impersonation  │  │  │ every layer    │ │                    │
+ │                │ │ ✦ --ai-body:   │  │  │                │ │                    │
+ │                │ │ any language   │  │  │                │ │                    │
  └───────┬────────┘ └───────┬────────┘  │  └───────┬────────┘ └─────────┬──────────┘
          │                  │           │          │          ┌─────────┴─────────┐
          │                  │           │          │          ▼                   ▼
@@ -289,7 +291,7 @@ See [`examples/sample_triage_report.pdf`](examples/sample_triage_report.pdf) for
 | YARA rule match — **medium** severity | +25 |
 | YARA rule match — low / unspecified severity | +12 |
 | Header risk score (spoofing / auth failures) | ×0.30 (max 30) |
-| Body anomaly score (spam / brand impersonation) | ×0.20 (max 20) |
+| Body score — rule-based **or** `--ai-body`, whichever is stronger (never summed) | ×0.20 (max 20) |
 | Domain registered **< 30 days** ago | +15 |
 | Domain registered < 180 days ago | +8 |
 | Risky attachment extension (`.exe`, `.docm`, `.iso`, …) | +10 |
@@ -464,6 +466,35 @@ is data rather than instructions, asks it to **report** manipulation attempts
 (`injection_suspected` — itself a maliciousness signal, logged at WARNING),
 validates every returned field against a strict schema, and length-caps
 untrusted strings so a huge body cannot flood the context or the cost budget.
+
+### `--ai-body`: language-independent body analysis
+
+The rule-based body detector scores messages with English keyword lists, so a
+blatant phishing email in another language scores near zero there. In testing,
+a Turkish banking lure demanding a national ID number and a card PIN
+contributed **0 points** and the pipeline returned **CLEAN 30.5**. With
+`--ai-body` the same email is read semantically and returns **SUSPICIOUS 48.1**:
+
+```bash
+python3 skills/email-triage-pipeline/scripts/triage_pipeline.py mail.eml \
+    --skills-root skills --ai-body -o report.json
+```
+
+```
+[+ 17.6] body_anomaly: AI body analysis (Turkish): risk=88, verdict=malicious;
+         tactics: urgency, account suspension threat, credential request,
+         brand impersonation; impersonates GlobalBank; requests credentials
+         [rule-based score was 0.0]
+```
+
+The model reports the body's language, the social-engineering tactics it used,
+any impersonated organisation, and whether credentials were requested — all in
+whatever language the email was written in. The deterministic detector is left
+untouched: it stays offline, fast, and explainable, and the two never
+double-count because the **stronger** of the two body scores is used. An AI
+verdict of "clean" can therefore never erase a rule-based suspicion.
+
+`--ai-body` is independent of `--ai`: use either, both, or neither.
 
 **Operationally:** `temperature: 0` for reproducible classification,
 exponential backoff on 429/5xx while 4xx fails fast, one repair retry when the

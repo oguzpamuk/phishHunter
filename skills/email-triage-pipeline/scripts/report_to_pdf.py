@@ -307,13 +307,22 @@ def sec_headers(report, max_rows):
 
 
 def sec_body(report):
-    """Section 6 — body anomaly summary (schema-tolerant)."""
+    """Section 6 — body analysis: rule-based score plus the optional AI pass.
+
+    The AI sub-block only appears when --ai-body was used. It sits next to the
+    rule-based score rather than replacing it, so a reader can see both what
+    the keyword lists found and what the model read semantically — especially
+    useful when the body is not in English and the rule-based score is
+    therefore near zero.
+    """
     b = report.get("body_analysis")
+    ai_b = report.get("body_ai_analysis")
     out = [Paragraph("4. Body Analysis", S_H2)]
-    if not b:
+    if not b and not ai_b:
         out.append(Paragraph("<i>Stage not available (no body text or "
                              "stage skipped).</i>", S_SMALL))
         return out
+    b = b or {}
     score = (b.get("anomaly_score") or (b.get("anomaly") or {}).get("score")
              or b.get("score"))
     verdict = b.get("verdict") or b.get("final_verdict")
@@ -323,6 +332,26 @@ def sec_body(report):
     if brands:
         text += f"<br/>Brand signals: {esc(json.dumps(brands, ensure_ascii=False), max_len=400)}"
     out.append(Paragraph(text, S_BODY))
+
+    if ai_b:
+        out.append(Spacer(1, 6))
+        out.append(Paragraph("<b>AI body analysis</b>", S_BODY))
+        if ai_b.get("injection_suspected"):
+            out.append(Paragraph(
+                '<font color="#B71C1C"><b>Prompt-injection attempt in the '
+                'message body:</b></font> '
+                + esc(ai_b.get("injection_evidence"), max_len=400), S_BODY))
+        rows = [["Language", ai_b.get("language")],
+                ["Verdict", f"{str(ai_b.get('verdict','')).upper()} "
+                            f"({ai_b.get('confidence')})"],
+                ["Risk score", f"{ai_b.get('risk_score')}/100"],
+                ["Tactics", ", ".join(ai_b.get("tactics") or []) or None],
+                ["Impersonated brand", ai_b.get("impersonated_brand")],
+                ["Requests credentials",
+                 "YES" if ai_b.get("credential_request") else "no"]]
+        out.append(make_table(["Field", "Value"], rows, [45, 135], 99))
+        out.append(Spacer(1, 3))
+        out.append(Paragraph(esc(ai_b.get("reasoning"), max_len=1500), S_BODY))
     return out
 
 

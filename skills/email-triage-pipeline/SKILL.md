@@ -61,6 +61,9 @@ python3 scripts/triage_pipeline.py mail.eml --ai -o report.json --pretty
   (auto-search order: `$EMAIL_TRIAGE_SKILLS_ROOT` → side-by-side install →
   `/mnt/skills/user` → `~/.claude/skills`).
 - Stage toggles: `--skip-intel`, `--skip-whois`, `--skip-body`.
+- `--ai-body` (optional): adds a semantic AI pass over the message body.
+  Language-independent, so it catches phishing the rule-based English keyword
+  lists score at zero. Requires `ANTHROPIC_API_KEY`; independent of `--ai`.
 - Limits: `--max-urls N` (default 10), `--max-domains N` (default 10),
   `--timeout N` seconds per stage (default 600).
 - Env keys (all optional): `VT_API_KEY`, `ABUSEIPDB_API_KEY`,
@@ -85,6 +88,14 @@ JSON report (stdout, or `-o file` + one-line verdict on stdout) containing:
     {"signal": "header_risk", "points": 13.5, "detail": "header risk_score=45; ..."},
     {"signal": "very_young_domain", "points": 15, "detail": "evil.com (4d)"}
   ]
+},
+"body_ai_analysis": {              // only with --ai-body
+  "verdict": "malicious", "confidence": "high", "risk_score": 88,
+  "language": "Turkish",
+  "tactics": ["urgency", "credential request", "brand impersonation"],
+  "impersonated_brand": "GlobalBank", "credential_request": true,
+  "reasoning": "...", "injection_suspected": false,
+  "model": "...", "usage": {...}, "attempts": 1
 },
 "ai_analysis": {                   // only with --ai
   "model": "claude-sonnet-4-6", "verdict": "malicious", "confidence": "high",
@@ -122,10 +133,17 @@ one repair retry when the model wraps its JSON in prose or fences.
 Set `ANTHROPIC_BASE_URL` to route the stage through an API-compatible
 gateway (corporate proxy, LiteLLM, self-hosted relay).
 
-**Scoring model**: intel malicious +60 / suspicious +25 · header risk ×0.30
-(max 30) · body anomaly ×0.20 (max 20) · domain <30 days +15 (<180d +8) ·
+**Scoring model**: intel malicious +60 / suspicious +25 · YARA match +50
+(high/critical) / +25 (medium) / +12 (low or unspecified) · header risk ×0.30
+(max 30) · body ×0.20 (max 20) · domain <30 days +15 (<180d +8) ·
 risky attachment extension +10 · HTML-only hidden links +5.
 Thresholds: ≥70 malicious, ≥40 suspicious, else clean.
+
+**Body signals never double-count.** The rule-based score and the `--ai-body`
+assessment measure the same property, so the **stronger of the two** is used
+rather than their sum. Taking the maximum is also the conservative choice: an
+AI verdict of "clean" can never erase a rule-based suspicion, it can only add
+signal the keyword lists could not see.
 
 **Exit codes**: `0` clean, `1` suspicious, `2` malicious, `3` fatal error —
 directly usable in shell automation and mail-gateway hooks.

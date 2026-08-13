@@ -107,13 +107,33 @@ async function render() {
       (findings ? `<div style="margin-top:12px">${findings}</div>` : "")));
   }
 
-  /* 4 — Body analysis */
-  const b = rep.body_analysis;
-  if (b) {
-    const score = b.anomaly_score ?? b.anomaly?.score ?? b.score;
-    parts.push(card(sec("Body analysis") + kv([
-      ["Anomaly score", `<span class="score">${esc(score)}/100</span>`],
-      ["Verdict", esc(b.verdict || b.final_verdict)]])));
+  /* 4 — Body analysis (rule-based score + optional AI pass) */
+  const b = rep.body_analysis, aiB = rep.body_ai_analysis;
+  if (b || aiB) {
+    const score = b ? (b.anomaly_score ?? b.anomaly?.score ?? b.score) : null;
+    let rows = [];
+    if (b) rows.push(
+      ["Rule-based score", `<span class="score">${esc(score)}/100</span> (${esc(b.verdict || b.final_verdict)})`]);
+    let aiFlag = "";
+    if (aiB) {
+      if (aiB.injection_suspected) {
+        aiFlag = `<div style="background:rgba(231,76,60,.15);border-left:3px solid var(--malicious);
+          padding:8px 12px;margin-bottom:10px;font-size:13.5px">
+          <b>Prompt-injection attempt in the message body:</b>
+          ${esc(aiB.injection_evidence)}</div>`;
+      }
+      rows = rows.concat([
+        ["AI verdict", `<span class="badge ${esc(aiB.verdict)}">${esc(aiB.verdict)}</span>
+                        (${esc(aiB.confidence)}) · <span class="score">${esc(aiB.risk_score)}/100</span>`],
+        ["Language", esc(aiB.language)],
+        ["Tactics", (aiB.tactics || []).length
+            ? `<div class="pill-list">` + aiB.tactics.map(t => `<div class="pill">${esc(t)}</div>`).join("") + `</div>`
+            : "&#8212;"],
+        ["Impersonated brand", esc(aiB.impersonated_brand)],
+        ["Requests credentials", aiB.credential_request ? "<b>yes</b>" : "no"],
+        ["AI reasoning", esc(aiB.reasoning)]]);
+    }
+    parts.push(card(sec("Body analysis") + aiFlag + kv(rows)));
   }
 
   /* 4b — YARA matches */
