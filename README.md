@@ -281,11 +281,90 @@ See [`examples/sample_triage_report.pdf`](examples/sample_triage_report.pdf) for
 
 ---
 
+## 🔍 What phishHunter actually checks
+
+Every check below is implemented and testable today. Each row names the module
+that performs it, so you can trace any verdict back to the code that produced
+it. Checks marked **partial** work but have a documented limitation.
+
+### Sender identity & domain
+
+| Check | Module | Notes |
+|---|---|---|
+| `From` vs `Reply-To` divergence | `email-header-analyzer` | Critical finding — replies diverted elsewhere is a classic phishing pattern |
+| `Return-Path` vs `From` alignment | `email-header-analyzer` | Warning — also fires for legitimate bulk mailers |
+| `Message-ID` domain vs `From` domain | `email-header-analyzer` | Informational — some providers do this legitimately |
+| Registrable-domain comparison | `email-header-analyzer` | Compares the last two labels, so `mail.example.com` and `example.com` align |
+| Consumer webmail sender claiming to be an organisation | `email-header-analyzer` | Critical — a "Bank Support" mail sent from `gmail.com`. 40+ free and disposable providers |
+| Reply-To pointing at a consumer mailbox | `email-header-analyzer` | Critical — the classic business email compromise shape: corporate `From`, personal `Reply-To` |
+| Address hidden inside the display name | `email-header-analyzer` | Critical — `"support@bank.com" <attacker@evil.tld>`, since many clients show only the display name |
+| Display name claims a brand the domain does not match | `email-header-analyzer` | Warning — "Microsoft Security" sent from an unrelated domain |
+| Bidirectional-override characters in the display name | `email-header-analyzer` | Critical — invisible U+202E and friends reverse how the name renders |
+| Brand domain buried in a subdomain chain | `email-header-analyzer` | Critical — `paypal.com.guvenlik.xyz` reads as PayPal but belongs to `guvenlik.xyz` |
+| Punycode / IDN domains | `email-header-analyzer` | Warning — `xn--pypal-4ve.com` is how homograph attacks travel; flagged for decoding |
+| Lookalike / typosquat domains | `email-anomaly-detector` | Brand name embedded in a non-official domain (`paypal-security.xyz`) |
+| Homoglyph tricks | `email-anomaly-detector` | Cyrillic/Greek characters posing as Latin letters, normalized then compared |
+| Brand named but every link points elsewhere | `email-anomaly-detector` | Impersonation signal independent of domain spelling |
+| Sender domain age | `whois-lookup` | Domains under 30 days old score +15, under 180 days +8 |
+| Sender domain / IP reputation | `ioc-orchestrator` | VirusTotal, AbuseIPDB, OTX in parallel |
+
+### Headers & routing
+
+| Check | Module | Notes |
+|---|---|---|
+| SPF result | `email-header-analyzer` | From `Authentication-Results`, falling back to `Received-SPF` |
+| DKIM result | `email-header-analyzer` | Result only — the `DKIM-Signature` header itself is not parsed |
+| DMARC result | `email-header-analyzer` | Hard failure is a critical finding |
+| Missing authentication headers | `email-header-analyzer` | Absence of results is itself reported |
+| Full `Received` chain reconstruction | `email-header-analyzer` | Hops ordered oldest-first with per-hop timing |
+| Relay without valid reverse DNS | `email-header-analyzer` | `unknown` in the `Received` line — common for compromised senders |
+| Private/reserved IP mid-chain | `email-header-analyzer` | Informational routing anomaly |
+| Implausible hop delays | `email-header-analyzer` | Over an hour, or negative — a sign of forged timestamps |
+| `Date` header ahead of delivery | `email-header-analyzer` | Forged sending time |
+| Missing `From` / `Date` / `Message-ID` | `email-header-analyzer` | Unusual for legitimate mail |
+
+### Links & content
+
+| Check | Module | Notes |
+|---|---|---|
+| URL extraction from text and HTML | `ioc-extractor` | Includes `href`/`src` attributes, so hidden targets are caught |
+| Links present only in HTML, never in visible text | `ioc-extractor` → verdict engine | +5, flags possible link-text mismatch |
+| Defanged indicators | `ioc-extractor` | `hxxp://`, `evil[.]com`, `user[at]host` are refanged before analysis |
+| URL reputation | `ioc-orchestrator` | VirusTotal, urlscan.io, OTX |
+| Where a URL actually lands | `urlscan` | Live scan reports the final URL and a screenshot — **partial**: the full redirect chain is not enumerated |
+| URL shorteners | `email-anomaly-detector` | 10 known shorteners flagged as target-hiding |
+| High-abuse TLDs | `email-anomaly-detector` | Cheap TLDs disproportionately used for phishing |
+| Raw IP address links | `email-anomaly-detector` | Links to a bare IP instead of a hostname |
+| Excessive or minimal link density | `email-anomaly-detector` | Link-only bodies and link-stuffed bodies both score |
+
+### Message body
+
+| Check | Module | Notes |
+|---|---|---|
+| Urgency, deadline and account-threat pressure | `email-anomaly-detector` | 14 rule-based lure patterns |
+| Verification / credential-harvesting lures | `email-anomaly-detector` | **Partial** — Turkish and English credential wording is recognised, but only *inside* brand-impersonation scoring, and the standalone spam patterns are English-only |
+| Brand impersonation | `email-anomaly-detector` | 34 global and Turkish brands (banks, cargo, marketplaces, telcos) |
+| Impersonal greetings, capitalisation and punctuation abuse | `email-anomaly-detector` | Classic bulk-phishing style markers |
+| Semantic analysis in **any language** | `--ai-body` (optional) | Detects the body's language, social-engineering tactics, impersonated organisation and credential requests without keyword lists |
+
+### Attachments
+
+| Check | Module | Notes |
+|---|---|---|
+| Risky extensions | `ioc-extractor` | 34 types — `.exe`, `.docm`, `.iso`, `.lnk`, `.hta`, `.js` and more; +10 |
+| SHA256 of every attachment | `ioc-extractor` | Computed locally, no upload required |
+| Hash reputation | `ioc-orchestrator` | VirusTotal and Hybrid Analysis |
+| Sandbox detonation | `hybrid-analysis`, `virustotal` | Opt-in via `--upload` only — uploaded files become community-visible |
+| Custom YARA rules across every layer | `email-yara-scanner` | Optional; raw bytes, headers, bodies and each attachment. A high-severity match adds +50 |
+
+---
+
 ## ⚖️ Verdict scoring model
 
 | Signal | Points |
 |---|---|
 | Threat intel: any IOC rated **malicious** | +60 |
+| Sender-identity deception (free-mail BEC, spoofed display name, deceptive subdomain) | raises the header signal to a floor of 40 |
 | YARA rule match — **high/critical** severity | +50 |
 | Threat intel: any IOC rated **suspicious** | +25 |
 | YARA rule match — **medium** severity | +25 |

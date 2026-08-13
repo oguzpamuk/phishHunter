@@ -83,6 +83,96 @@ from email.utils import parseaddr, parsedate_to_datetime
 AUTH_FAIL = {"fail", "permerror"}
 AUTH_SOFT = {"softfail", "temperror", "none", "neutral"}
 
+# ---------------------------------------------------------------------------
+# Consumer webmail providers. Perfectly legitimate for personal correspondence,
+# but a red flag when the message claims to speak for an organisation, and a
+# strong one when it is the Reply-To of a mail that looks corporate — the
+# standard shape of business email compromise (BEC).
+# ---------------------------------------------------------------------------
+FREEMAIL_DOMAINS = {
+    # global
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+    "msn.com", "yahoo.com", "ymail.com", "rocketmail.com", "aol.com",
+    "icloud.com", "me.com", "mac.com", "proton.me", "protonmail.com",
+    "gmx.com", "gmx.net", "mail.com", "zoho.com", "yandex.com", "yandex.ru",
+    "tutanota.com", "fastmail.com", "hushmail.com",
+    # disposable / throwaway, frequently used by attackers
+    "mailinator.com", "guerrillamail.com", "10minutemail.com", "temp-mail.org",
+    "throwawaymail.com", "sharklasers.com", "yopmail.com",
+    # regional (Turkey and neighbours)
+    "yandex.com.tr", "mynet.com", "superonline.com", "ttmail.com",
+}
+
+# Organisation names commonly impersonated in the display name. Used only to
+# spot "<brand> Security <someone@unrelated.tld>" — the body-level brand
+# tables live in the email-anomaly-detector skill.
+IMPERSONATED_TERMS = {
+    "paypal", "amazon", "apple", "microsoft", "office365", "google", "netflix",
+    "facebook", "instagram", "linkedin", "dhl", "fedex", "ups", "ptt", "visa",
+    "mastercard", "stripe", "ziraat", "garanti", "akbank", "halkbank",
+    "vakifbank", "isbank", "yapikredi", "papara", "trendyol", "hepsiburada",
+    "turkcell", "vodafone", "bank", "banka", "helpdesk", "it support",
+    "support team", "security team", "payroll", "hr department",
+}
+
+# Right-to-left override and friends: invisible characters that reverse how a
+# string is displayed, used to disguise addresses and file names.
+BIDI_CONTROLS = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+                 "\u2066", "\u2067", "\u2068", "\u2069", "\u200f", "\u200e"}
+
+
+def is_freemail(domain):
+    """True when a domain is a consumer webmail or disposable-mail provider.
+
+    Input : registrable domain string (or None)
+    Output: bool
+    """
+    if not domain:
+        return False
+    d = domain.lower()
+    return d in FREEMAIL_DOMAINS or base_domain(d) in FREEMAIL_DOMAINS
+
+
+def looks_deceptive_subdomain(domain):
+    """Detect a real brand domain buried in someone else's subdomain chain.
+
+    `paypal.com.security-check.xyz` reads as "paypal.com" to a hurried human
+    but is really a host under `security-check.xyz`. The trick is that a
+    legitimate-looking domain (label + TLD-like label) appears somewhere other
+    than the final two labels.
+
+    Input : full hostname, e.g. "paypal.com.guvenlik.xyz"
+    Output: the impersonated fragment ("paypal.com") or None.
+    """
+    if not domain:
+        return None
+    labels = domain.lower().strip(".").split(".")
+    if len(labels) < 4:          # need at least brand.tld.something.tld
+        return None
+    # Look at every adjacent pair before the registrable domain itself.
+    common_tlds = {"com", "net", "org", "gov", "edu", "co", "io", "tr",
+                   "de", "fr", "uk", "ru"}
+    for i in range(len(labels) - 3):
+        if labels[i + 1] in common_tlds and len(labels[i]) > 2:
+            return f"{labels[i]}.{labels[i + 1]}"
+    return None
+
+
+def has_punycode(domain):
+    """True when any label of the domain is IDN/punycode-encoded (xn--).
+
+    Punycode is legitimate for non-Latin scripts, but it is also how homograph
+    attacks are transmitted: `xn--pypal-4ve.com` renders as `pаypal.com` with
+    a Cyrillic 'а'. Worth surfacing so a human can decode it.
+    """
+    return bool(domain) and any(lbl.startswith("xn--")
+                                for lbl in domain.lower().split("."))
+
+
+def has_bidi_control(text):
+    """True when a string contains bidirectional-override characters."""
+    return bool(text) and any(ch in BIDI_CONTROLS for ch in text)
+
 
 def norm_headers(headers: dict) -> dict:
     """Lowercase all header names; keep values untouched.
@@ -262,6 +352,101 @@ def analyze(headers: dict) -> dict:
                 "legitimately).")
 
     # ------------------------------------------------------------------
+    # Sender-identity deception
+    #
+    # These checks look at WHO the message claims to be from, as opposed to
+    # whether the transport authenticated it. They catch the cases where SPF,
+    # DKIM and DMARC all pass — because the attacker really does own the
+    # sending domain — but the message is still impersonating someone.
+    # ------------------------------------------------------------------
+    from_name = (frm or {}).get("name") or ""
+    from_domain = (frm or {}).get("domain")
+
+    # 1. Sender is a consumer webmail account.
+    if is_freemail(from_domain):
+        # Only interesting when the message presents itself as an
+        # organisation; personal mail from a personal account is normal.
+        claims_org = any(term in from_name.lower()
+                         for term in IMPERSONATED_TERMS)
+        if claims_org:
+            finding("critical", "FREEMAIL_SENDER_IMPERSONATION",
+                    f"Sender uses the consumer mail provider "
+                    f"'{from_domain}' while presenting itself as "
+                    f"'{from_name}' — organisations do not send official "
+                    "mail from free webmail accounts.")
+        else:
+            finding("info", "FREEMAIL_SENDER",
+                    f"Sender uses a consumer/disposable mail provider "
+                    f"({from_domain}) — normal for personal mail, worth "
+                    "noting for anything claiming to be official.")
+
+    # 2. Reply-To points at a consumer webmail account.
+    reply_domain = (reply_to or {}).get("domain")
+    if reply_domain and is_freemail(reply_domain):
+        if not is_freemail(from_domain):
+            finding("critical", "FREEMAIL_REPLY_TO",
+                    f"Replies are directed to a consumer mail account "
+                    f"({reply_to['email']}) while the message comes from "
+                    f"{from_domain} — the classic business email compromise "
+                    "pattern.")
+        else:
+            finding("info", "FREEMAIL_REPLY_TO_CONSISTENT",
+                    f"Reply-To is a consumer mail account "
+                    f"({reply_domain}), consistent with the sender.")
+
+    # 3 & 4. Display-name deception.
+    if from_name:
+        # An address inside the display name: many clients show only the
+        # display name, so "support@bank.com" <attacker@evil.tld> looks
+        # entirely legitimate at a glance.
+        m = re.search(r"[\w.+-]+@([\w.-]+\.\w{2,})", from_name)
+        if m:
+            shown = m.group(1).lower()
+            if base_domain(shown) != base_domain(from_domain or ""):
+                finding("critical", "DISPLAY_NAME_SPOOFED_ADDRESS",
+                        f"The display name contains the address "
+                        f"'{m.group(0)}' but the message is really from "
+                        f"{frm['email']} — mail clients often show only the "
+                        "display name.")
+        # A brand or department claimed in the display name while the actual
+        # domain is unrelated.
+        elif from_domain:
+            name_l = from_name.lower()
+            hit = next((t for t in IMPERSONATED_TERMS if t in name_l), None)
+            if hit and hit not in from_domain.lower():
+                finding("warning", "DISPLAY_NAME_BRAND_MISMATCH",
+                        f"Display name claims '{from_name}' but the sending "
+                        f"domain is {from_domain}, which is unrelated to "
+                        f"'{hit}'.")
+        # Invisible direction-control characters in the display name.
+        if has_bidi_control(from_name):
+            finding("critical", "DISPLAY_NAME_BIDI_OVERRIDE",
+                    "The display name contains bidirectional-override "
+                    "characters, which reverse how it is rendered and are "
+                    "used to disguise the real sender.")
+
+    # 5. A brand domain hidden inside someone else's subdomain chain.
+    for label, dom in (("From", from_domain),
+                       ("Reply-To", reply_domain),
+                       ("Return-Path", (return_path or {}).get("domain"))):
+        buried = looks_deceptive_subdomain(dom)
+        if buried:
+            finding("critical", "DECEPTIVE_SUBDOMAIN",
+                    f"{label} host '{dom}' places '{buried}' in a subdomain "
+                    f"of '{base_domain(dom)}' — it reads like {buried} but "
+                    f"is controlled by {base_domain(dom)}.")
+
+    # 6. Punycode / IDN domains, the transport form of homograph attacks.
+    for label, dom in (("From", from_domain),
+                       ("Reply-To", reply_domain),
+                       ("Return-Path", (return_path or {}).get("domain"))):
+        if has_punycode(dom):
+            finding("warning", "PUNYCODE_DOMAIN",
+                    f"{label} domain '{dom}' is IDN/punycode-encoded — it may "
+                    "render as a familiar name using lookalike characters. "
+                    "Decode it before trusting it.")
+
+    # ------------------------------------------------------------------
     # Authentication (SPF / DKIM / DMARC)
     # ------------------------------------------------------------------
     auth = parse_auth_results(headers.get("authentication-results"),
@@ -360,8 +545,18 @@ def analyze(headers: dict) -> dict:
     return {
         "summary": {"verdict": verdict, "risk_score": risk,
                     "risk_level": level},
-        "identity": {"from": frm, "reply_to": reply_to,
-                     "return_path": return_path, "alignment": alignment},
+        "identity": {
+            "from": frm, "reply_to": reply_to,
+            "return_path": return_path, "alignment": alignment,
+            # Machine-readable summary of the sender-deception checks, so
+            # downstream consumers do not have to grep the findings list.
+            "sender_flags": {
+                "from_is_freemail": is_freemail(from_domain),
+                "reply_to_is_freemail": is_freemail(reply_domain),
+                "display_name": from_name or None,
+                "deceptive_subdomain": looks_deceptive_subdomain(from_domain),
+                "punycode": has_punycode(from_domain),
+            }},
         "authentication": {
             **auth,
             "raw_authentication_results":

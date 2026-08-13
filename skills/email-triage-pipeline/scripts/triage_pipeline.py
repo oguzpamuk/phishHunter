@@ -697,13 +697,40 @@ def compute_verdict(header_rep, body_rep, iocs_rep, intel_rep, whois_rep,
                 f"{', '.join(susp[:5])}")
 
     # --- Header analysis ------------------------------------------------
+    # Codes that mean "someone is impersonating a person or an organisation",
+    # as opposed to the transport/routing anomalies that make up most header
+    # findings. These deserve to escalate on their own: a business email
+    # compromise typically passes SPF, DKIM and DMARC (the attacker really
+    # owns the sending domain) and shows no other anomaly, so diluting it
+    # through the same ×0.30 multiplier as a clock-skew warning would let a
+    # textbook BEC land as "clean".
+    IDENTITY_DECEPTION_CODES = {
+        "FREEMAIL_SENDER_IMPERSONATION", "FREEMAIL_REPLY_TO",
+        "DISPLAY_NAME_SPOOFED_ADDRESS", "DISPLAY_NAME_BIDI_OVERRIDE",
+        "DECEPTIVE_SUBDOMAIN",
+    }
+    # Floor applied when one of those fires, chosen so identity deception on
+    # its own reaches the "suspicious" threshold and gets a human look, while
+    # still leaving room below "malicious" for cases with no other evidence.
+    IDENTITY_DECEPTION_FLOOR = 40
+
     if header_rep:
         hs = ((header_rep.get("summary") or {}).get("risk_score")) or 0
         crit = [f["message"] for f in header_rep.get("findings", [])
                 if f.get("severity") == "critical"]
-        add(hs * 0.30, "header_risk",
-            f"header risk_score={hs}"
-            + (f"; critical: {'; '.join(crit[:3])}" if crit else ""))
+        header_points = hs * 0.30
+        deception = [f["code"] for f in header_rep.get("findings", [])
+                     if f.get("code") in IDENTITY_DECEPTION_CODES]
+        detail = (f"header risk_score={hs}"
+                  + (f"; critical: {'; '.join(crit[:3])}" if crit else ""))
+        if deception and header_points < IDENTITY_DECEPTION_FLOOR:
+            # Raise to the floor rather than adding a second signal, so the
+            # same finding is never counted twice.
+            header_points = IDENTITY_DECEPTION_FLOOR
+            detail += (f"; sender-identity deception ({', '.join(deception)}) "
+                       f"raises this signal to the {IDENTITY_DECEPTION_FLOOR}"
+                       "-point floor")
+        add(header_points, "header_risk", detail)
 
     # --- Body anomaly ---------------------------------------------------
     bs = 0          # rule-based score; stays 0 when the stage did not run
