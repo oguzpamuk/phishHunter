@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Web UI runtime data — CRITICAL: uploads, reports, logs and the SQLite index
+# contain the content of analyzed emails (recipient addresses, internal
+# domains, attachments). These must never reach a repository.
+# ---------------------------------------------------------------------------
+webui/data/
+
+# Triage artifacts produced by CLI runs
+*.report.json
+report.json
+parsed.json
+
+# Structured audit logs
+*.log
+logs/
+
+# Real email samples — examples/ ships synthetic ones only
+/emails/
+*.msg
+!examples/*.msg
+
+# API keys / environment files
+.env
+.env.*
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

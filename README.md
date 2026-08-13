@@ -184,7 +184,6 @@ Useful flags:
 
 ```bash
 python3 webui/app.py --port 9000          # use a port other than the default 8787
-python3 webui/app.py --host 0.0.0.0       # expose on the LAN (see warning below)
 python3 webui/app.py --skills-root /path/to/skills   # non-standard skill location
 ```
 
@@ -224,9 +223,20 @@ threat intel, WHOIS ages, and the stage audit trail:
 
 ![Analysis history](docs/screenshots/04-history.png)
 
-> 🔒 The console binds to `127.0.0.1` by default and has no authentication —
-> it is a single-analyst workstation tool. Put an authenticated reverse
-> proxy in front of it before exposing it on a network.
+> 🔒 **Security & privacy notes.** The console binds to `127.0.0.1` and has no
+> authentication or CSRF protection — it is a single-analyst workstation tool.
+> `--host` can bind it elsewhere, but only do so behind an authenticated
+> reverse proxy on a trusted network. There is also no cap on concurrent
+> analyses, so keep it off untrusted networks.
+>
+> Everything under `webui/data/` — uploaded emails, reports, and logs —
+> contains the content of the messages you analyze, including recipient
+> addresses and internal domains. It is gitignored; keep it that way, and
+> treat that folder with the same care as the mailbox it came from.
+>
+> Note that the threat-intel stage sends extracted IOCs (domains, URLs,
+> hashes) to third-party services. Untick it for sensitive material, or run
+> the CLI with `--skip-intel`.
 
 ---
 
@@ -236,17 +246,21 @@ threat intel, WHOIS ages, and the stage audit trail:
 ==============================================================
 EMAIL TRIAGE REPORT — sample_phishing.eml
 ==============================================================
-VERDICT : SUSPICIOUS   score=51.2/100   confidence=medium
-Subject : Urgent: Your PayPal account is suspended - verify now!
-From    : PayPal Security <security@paypal.com>
+VERDICT : SUSPICIOUS   score=52.2/100   confidence=medium
+Subject : Urgent: Your GlobalPay account is suspended - verify now!
+From    : GlobalPay Security <security@globalpay.example>
 --------------------------------------------------------------
 Signals:
   [+ 30.0] header_risk: header risk_score=100; critical: Reply-To domain
-           (mail-secure-login.xyz) differs from From domain (paypal.com);
-           SPF check failed; DKIM check failed ...
-  [+  6.2] body_anomaly: body anomaly score=31.0; verdict=SUSPICIOUS
+           (mail-secure-login.xyz) differs from From domain (globalpay.example) —
+           replies are diverted to a different party, a classic phishing pattern.; SPF
+           check failed (fail) — the sending server is not authorized / the signature is
+           invalid.; DKIM check failed (fail) — the sending server is not authorized /
+           the signature is invalid.
+  [+  7.2] body_anomaly: body anomaly score=36.0; verdict=SUSPICIOUS
   [+   10] risky_attachment: risky attachment extension(s): invoice.docm
-  [+    5] html_only_links: 2 URL(s) present only in HTML attributes
+  [+    5] html_only_links: 2 URL(s) present only in HTML attributes (possible
+           hidden/mismatched links)
 ==============================================================
 ```
 
@@ -486,6 +500,8 @@ API-compatible gateway (corporate proxy, LiteLLM, self-hosted relay).
 │   ├── templates/               #   dashboard · analyze · report · history
 │   ├── static/                  #   design system (style.css)
 │   └── data/                    #   runtime: uploads, reports, logs, SQLite (gitignored)
+├── tools/
+│   └── check_duplicates.py      # guards the intentionally duplicated scripts
 └── examples/
     ├── sample_phishing.eml      # synthetic test phishing email
     ├── sample_clean.eml         # synthetic clean email
@@ -502,6 +518,17 @@ The heuristic and AI verdicts are **decision-support indicators, not proof**. Al
 ## 🤝 Contributing
 
 Issues and PRs are welcome — new intel sources plug in cleanly as additional skills consumed by `ioc-orchestrator`, and new verdict signals are a single `add(...)` call in the pipeline's verdict engine.
+
+**One thing to know before editing:** a few lookup scripts are deliberately
+duplicated so each skill stays installable on its own — for example
+`vt_lookup.py` exists under both `skills/virustotal/` and
+`skills/ioc-orchestrator/`. If you change one copy, change the other. This
+check catches drift:
+
+```bash
+python3 tools/check_duplicates.py        # exits non-zero if copies diverge
+python3 tools/check_duplicates.py --fix  # propagate the newest copy
+```
 
 ## 📄 License
 
