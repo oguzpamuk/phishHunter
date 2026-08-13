@@ -420,9 +420,21 @@ def sec_ai(report):
     out = [Paragraph("8. AI Analyst Assessment", S_H2),
            Paragraph(f"Model: <b>{esc(ai.get('model'))}</b> &nbsp;·&nbsp; "
                      f"Verdict: <b>{esc(str(ai.get('verdict')).upper())}</b> "
-                     f"({esc(ai.get('confidence'))})", S_BODY),
-           Spacer(1, 3),
-           Paragraph(esc(ai.get("reasoning"), max_len=2000), S_BODY)]
+                     f"({esc(ai.get('confidence'))})", S_BODY)]
+    # Surface the two things an analyst must not miss: a model that disagrees
+    # with the deterministic engine, and an email that tried to manipulate it.
+    if ai.get("agrees_with_heuristic") is False:
+        out.append(Paragraph(
+            '<font color="#E65100"><b>Disagrees with the heuristic verdict '
+            f'({esc((report.get("verdict") or {}).get("verdict"))}) — '
+            'review manually.</b></font>', S_BODY))
+    if ai.get("injection_suspected"):
+        out.append(Paragraph(
+            '<font color="#B71C1C"><b>Prompt-injection attempt detected in '
+            'the analyzed email:</b></font> '
+            + esc(ai.get("injection_evidence"), max_len=400), S_BODY))
+    out += [Spacer(1, 3),
+            Paragraph(esc(ai.get("reasoning"), max_len=2000), S_BODY)]
     actions = ai.get("recommended_actions") or []
     if actions:
         out.append(Spacer(1, 3))

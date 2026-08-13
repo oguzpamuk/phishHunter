@@ -184,7 +184,20 @@ async function render() {
   /* 8 — AI analyst */
   const ai = rep.ai_analysis;
   if (ai) {
-    parts.push(card(sec("AI analyst assessment") + kv([
+    // Two flags an analyst must not miss, shown above the reasoning.
+    let flags = "";
+    if (ai.agrees_with_heuristic === false) {
+      flags += `<div style="background:rgba(230,126,34,.15);border-left:3px solid var(--suspicious);
+        padding:8px 12px;margin-bottom:10px;font-size:13.5px">
+        <b>Disagrees with the heuristic verdict (${esc(v.verdict)})</b> — review manually.</div>`;
+    }
+    if (ai.injection_suspected) {
+      flags += `<div style="background:rgba(231,76,60,.15);border-left:3px solid var(--malicious);
+        padding:8px 12px;margin-bottom:10px;font-size:13.5px">
+        <b>Prompt-injection attempt detected in this email:</b>
+        ${esc(ai.injection_evidence)}</div>`;
+    }
+    parts.push(card(sec("AI analyst assessment") + flags + kv([
       ["Model", esc(ai.model)],
       ["Verdict", `<span class="badge ${esc(ai.verdict)}">${esc(ai.verdict)}</span> (${esc(ai.confidence)})`],
       ["Reasoning", esc(ai.reasoning)],
