@@ -166,6 +166,34 @@ async function render() {
       </div>`));
   }
 
+  /* 5b — Attachments: what each file really is, versus what it claims */
+  const atts = rep.iocs?.attachments || [];
+  if (atts.length) {
+    const rows = atts.map(a => {
+      const flags = [];
+      if (a.risky_extension) flags.push(`<span class="badge suspicious">risky ext</span>`);
+      if (a.extension_mismatch) flags.push(`<span class="badge malicious">type mismatch</span>`);
+      if (a.double_extension) flags.push(`<span class="badge malicious">double ext</span>`);
+      if (a.bidi_filename) flags.push(`<span class="badge malicious">RTL name</span>`);
+      const ar = a.archive || {};
+      if (ar.encrypted) flags.push(`<span class="badge malicious">encrypted archive</span>`);
+      if ((ar.risky_entries || []).length) flags.push(`<span class="badge suspicious">risky inside</span>`);
+      if ((ar.nested_archive || []).length) flags.push(`<span class="badge error">nested archive</span>`);
+      const detail = [
+        a.extension_mismatch,
+        (ar.risky_entries || []).length ? "contains: " + ar.risky_entries.slice(0,4).join(", ") : null,
+        ar.entry_count != null ? `${ar.entry_count} entr${ar.entry_count === 1 ? "y" : "ies"}` : null
+      ].filter(Boolean).join(" · ");
+      return `<tr><td class="mono">${esc(a.filename)}</td>
+        <td class="mono">${esc(a.magic_type || a.content_type)}</td>
+        <td>${esc(a.size_bytes)}</td>
+        <td>${flags.join(" ") || "&#8212;"}<div style="color:var(--muted);font-size:12.5px">${esc(detail)}</div></td></tr>`;
+    }).join("");
+    parts.push(card(sec("Attachments") +
+      `<table class="list"><thead><tr><th>Filename</th><th>Real type</th>
+       <th>Bytes</th><th>Flags</th></tr></thead><tbody>${rows}</tbody></table>`));
+  }
+
   /* 6 — Threat intel */
   const intel = rep.intel;
   if (intel) {

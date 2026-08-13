@@ -352,6 +352,13 @@ it. Checks marked **partial** work but have a documented limitation.
 | Check | Module | Notes |
 |---|---|---|
 | Risky extensions | `ioc-extractor` | 34 types — `.exe`, `.docm`, `.iso`, `.lnk`, `.hta`, `.js` and more; +10 |
+| Real file type from magic bytes | `ioc-extractor` | 21 signatures — identifies what the file *is*, not what it is named |
+| Extension contradicts content | `ioc-extractor` | A `.pdf` that is really an executable scores +70 on its own; lesser mismatches +20 |
+| Double extension | `ioc-extractor` | `fatura.pdf.exe` — decoy extension in front of an executable one; +25 |
+| Bidirectional-override in the file name | `ioc-extractor` | U+202E reverses the displayed name to hide the real extension; +30 |
+| Archive contents listed | `ioc-extractor` | ZIP entries enumerated; risky files inside score +20 |
+| Password-protected archive | `ioc-extractor` | Contents cannot be scanned — the standard way to smuggle malware past filters; +25 |
+| Nested archives | `ioc-extractor` | An archive inside an archive, a common scanner-evasion trick; +8 |
 | SHA256 of every attachment | `ioc-extractor` | Computed locally, no upload required |
 | Hash reputation | `ioc-orchestrator` | VirusTotal and Hybrid Analysis |
 | Sandbox detonation | `hybrid-analysis`, `virustotal` | Opt-in via `--upload` only — uploaded files become community-visible |
@@ -373,6 +380,13 @@ it. Checks marked **partial** work but have a documented limitation.
 | Body score — rule-based **or** `--ai-body`, whichever is stronger (never summed) | ×0.20 (max 20) |
 | Domain registered **< 30 days** ago | +15 |
 | Domain registered < 180 days ago | +8 |
+| Attachment is an executable disguised by its extension | +70 |
+| Bidirectional-override characters in an attachment name | +30 |
+| Double extension (`invoice.pdf.exe`) | +25 |
+| Password-protected archive | +25 |
+| Risky file inside an archive | +20 |
+| Attachment content does not match its extension (non-executable) | +20 |
+| Nested archive | +8 |
 | Risky attachment extension (`.exe`, `.docm`, `.iso`, …) | +10 |
 | URLs present only in HTML attributes (hidden links) | +5 |
 

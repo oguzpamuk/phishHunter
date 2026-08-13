@@ -380,13 +380,33 @@ def sec_iocs(report, max_rows):
         out.append(Paragraph(f"<b>{title}</b>", S_BODY))
         out.append(make_table(cols, rows, widths, max_rows, mono_cols=mono))
         out.append(Spacer(1, 4))
-    att_rows = [[a.get("filename"), a.get("content_type"),
-                 a.get("size_bytes"),
-                 "YES" if a.get("risky_extension") else "no",
-                 a.get("sha256")] for a in rep.get("attachments") or []]
+    # Attachment table. "Real type" and "Flags" carry the content-based
+    # findings — what the file actually is, versus what it claims to be.
+    att_rows = []
+    for a in rep.get("attachments") or []:
+        flags = []
+        if a.get("risky_extension"):
+            flags.append("risky ext")
+        if a.get("extension_mismatch"):
+            flags.append("TYPE MISMATCH")
+        if a.get("double_extension"):
+            flags.append(f"double ext ({a['double_extension']})")
+        if a.get("bidi_filename"):
+            flags.append("RTL filename")
+        arch = a.get("archive") or {}
+        if arch.get("encrypted"):
+            flags.append("ENCRYPTED archive")
+        if arch.get("risky_entries"):
+            flags.append("risky inside: "
+                         + ", ".join(arch["risky_entries"][:3]))
+        if arch.get("nested_archive"):
+            flags.append("nested archive")
+        att_rows.append([a.get("filename"), a.get("size_bytes"),
+                         a.get("magic_type") or a.get("content_type"),
+                         ", ".join(flags) or "—", a.get("sha256")])
     out.append(Paragraph("<b>Attachments</b>", S_BODY))
-    out.append(make_table(["Filename", "Type", "Bytes", "Risky ext",
-                           "SHA256"], att_rows, [35, 35, 15, 15, 80],
+    out.append(make_table(["Filename", "Bytes", "Real type", "Flags",
+                           "SHA256"], att_rows, [32, 14, 28, 46, 60],
                           max_rows, mono_cols=(4,)))
     return out
 

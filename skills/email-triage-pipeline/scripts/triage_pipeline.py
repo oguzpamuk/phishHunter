@@ -812,11 +812,82 @@ def compute_verdict(header_rep, body_rep, iocs_rep, intel_rep, whois_rep,
             + ", ".join(labels))
 
     # --- Attachments ----------------------------------------------------
-    risky = [a["filename"] for a in (iocs_rep or {}).get("attachments", [])
-             if a.get("risky_extension")]
+    attachments = (iocs_rep or {}).get("attachments", [])
+    risky = [a["filename"] for a in attachments if a.get("risky_extension")]
     if risky:
         add(10, "risky_attachment",
             "risky attachment extension(s): " + ", ".join(map(str, risky[:5])))
+
+    # Content-based attachment deception. These are scored separately from
+    # the extension list because they are qualitatively stronger: a file
+    # whose bytes contradict its name, or an executable hidden behind a
+    # decoy extension, is deliberate disguise rather than merely a risky
+    # file type. A user can legitimately be sent a .docm; nobody is
+    # legitimately sent a .pdf that is really a PE binary.
+    #
+    # The mismatch is tiered, because not every mismatch is equally damning.
+    # A .jpg that is really a PNG is a mislabelled image; a .pdf that is
+    # really an executable has no innocent explanation, so it alone is enough
+    # to reach a malicious verdict.
+    EXECUTABLE_CONTENT = {"pe-executable", "elf-executable",
+                          "mach-o/java-class", "windows-shortcut",
+                          "shockwave-flash"}
+    exec_disguised, other_mismatch = [], []
+    for a in attachments:
+        if not a.get("extension_mismatch"):
+            continue
+        entry = f"{a['filename']} ({a['extension_mismatch']})"
+        if a.get("magic_type") in EXECUTABLE_CONTENT:
+            exec_disguised.append(entry)
+        else:
+            other_mismatch.append(entry)
+    if exec_disguised:
+        add(70, "executable_disguised_as_document",
+            "attachment is an executable wearing a harmless extension — "
+            "there is no legitimate reason for this: "
+            + "; ".join(exec_disguised[:3]))
+    if other_mismatch:
+        add(20, "attachment_type_mismatch",
+            "attachment content does not match its extension: "
+            + "; ".join(other_mismatch[:3]))
+
+    double_ext = [f"{a['filename']}" for a in attachments
+                  if a.get("double_extension")]
+    if double_ext:
+        add(25, "attachment_double_extension",
+            "executable hidden behind a decoy extension: "
+            + ", ".join(double_ext[:3]))
+
+    bidi_names = [a["filename"] for a in attachments if a.get("bidi_filename")]
+    if bidi_names:
+        add(30, "attachment_bidi_filename",
+            "attachment name uses bidirectional-override characters to "
+            "disguise its real extension: " + ", ".join(map(str, bidi_names[:3])))
+
+    # Archive contents. An encrypted archive defeats scanning outright, which
+    # is why it is the strongest of the three; the password is usually in the
+    # message body.
+    enc_archives = [a["filename"] for a in attachments
+                    if (a.get("archive") or {}).get("encrypted")]
+    if enc_archives:
+        add(25, "encrypted_archive",
+            "password-protected archive(s) — contents cannot be scanned: "
+            + ", ".join(map(str, enc_archives[:3])))
+
+    archive_risky = []
+    for a in attachments:
+        for entry in ((a.get("archive") or {}).get("risky_entries") or []):
+            archive_risky.append(f"{a['filename']}:{entry}")
+    if archive_risky:
+        add(20, "risky_archive_content",
+            "risky file(s) inside an archive: " + ", ".join(archive_risky[:5]))
+
+    nested = [a["filename"] for a in attachments
+              if (a.get("archive") or {}).get("nested_archive")]
+    if nested:
+        add(8, "nested_archive",
+            "archive containing another archive (a common way to evade "
+            "scanners): " + ", ".join(map(str, nested[:3])))
 
     # --- Hidden HTML links ----------------------------------------------
     html_only = [u["value"] for u in ((iocs_rep or {}).get("iocs") or {})

@@ -87,10 +87,12 @@ EXIT CODES
 import argparse
 import base64
 import hashlib
+import io
 import ipaddress
 import json
 import re
 import sys
+import zipfile
 from html import unescape
 from urllib.parse import urlparse
 
@@ -135,6 +137,143 @@ ALLOWLIST_DOMAINS = {
 # TLD-lookalike file extensions: "invoice.zip" matches RE_DOMAIN because
 # .zip / .mov ARE real TLDs, but inside email text they are usually files.
 AMBIGUOUS_FILE_TLDS = {"zip", "mov"}
+
+# ---------------------------------------------------------------------------
+# File-type identification by content ("magic bytes") rather than by name.
+#
+# An attachment's extension is attacker-controlled text; its first bytes are
+# not. Comparing the two catches the oldest trick in the book — a payload
+# named invoice.pdf that is really a Windows executable — and it costs
+# nothing because the bytes are already in memory for hashing.
+#
+# Each entry: (signature, offset, canonical type, extensions that are
+# legitimate for that type).
+# ---------------------------------------------------------------------------
+MAGIC_SIGNATURES = [
+    (b"MZ", 0, "pe-executable", {".exe", ".dll", ".scr", ".sys", ".cpl",
+                                 ".ocx", ".msi", ".com"}),
+    (b"\x7fELF", 0, "elf-executable", {".so", ".elf", ".bin", ""}),
+    (b"\xca\xfe\xba\xbe", 0, "mach-o/java-class", {".class", ".jar"}),
+    (b"%PDF", 0, "pdf", {".pdf"}),
+    (b"PK\x03\x04", 0, "zip-container", {
+        # OOXML, OpenDocument, JARs and plain archives all share this header.
+        ".zip", ".docx", ".xlsx", ".pptx", ".docm", ".xlsm", ".pptm",
+        ".dotm", ".xlam", ".odt", ".ods", ".odp", ".jar", ".apk", ".epub",
+        ".vsdx", ".onepkg", ".kmz", ".xpi", ".crx"}),
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 0, "ole2-compound", {
+        # Legacy Office, .msg files and some installers.
+        ".doc", ".xls", ".ppt", ".msg", ".msi", ".db", ".vsd"}),
+    (b"Rar!\x1a\x07", 0, "rar-archive", {".rar"}),
+    (b"7z\xbc\xaf\x27\x1c", 0, "7z-archive", {".7z"}),
+    (b"\x1f\x8b", 0, "gzip", {".gz", ".tgz", ".gzip"}),
+    (b"BZh", 0, "bzip2", {".bz2", ".tbz"}),
+    (b"\xfd7zXZ", 0, "xz", {".xz"}),
+    (b"ustar", 257, "tar", {".tar"}),
+    (b"\x89PNG", 0, "png", {".png"}),
+    (b"\xff\xd8\xff", 0, "jpeg", {".jpg", ".jpeg", ".jfif"}),
+    (b"GIF8", 0, "gif", {".gif"}),
+    (b"RIFF", 0, "riff", {".wav", ".avi", ".webp"}),
+    (b"\x25\x21PS", 0, "postscript", {".ps", ".eps"}),
+    (b"{\\rtf", 0, "rtf", {".rtf", ".doc"}),
+    (b"\x4c\x00\x00\x00\x01\x14\x02\x00", 0, "windows-shortcut", {".lnk"}),
+    (b"CWS", 0, "shockwave-flash", {".swf"}),
+    (b"CD001", 32769, "iso-image", {".iso"}),
+]
+
+# Extensions that are dangerous whatever they contain — used to judge the
+# CONTENTS of an archive, where the outer .zip looks harmless.
+ARCHIVE_INNER_RISKY = RISKY_EXTENSIONS | {".sh", ".py", ".pl", ".rb"}
+
+# Bidirectional-override characters. In a file name they reverse how the
+# rest of the string renders, so "annexe\u202egpj.exe" is displayed as
+# "annexeexe.jpg" — a classic way to disguise an executable.
+BIDI_CONTROLS = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+                 "\u2066", "\u2067", "\u2068", "\u2069", "\u200f", "\u200e"}
+
+# A double extension is only interesting when the FINAL one is executable and
+# the one before it is a document/media type the user was expecting.
+DECOY_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+                    ".txt", ".jpg", ".jpeg", ".png", ".gif", ".mp3", ".mp4",
+                    ".csv", ".rtf", ".htm", ".html", ".zip"}
+
+
+def identify_magic(raw):
+    """Identify a file's real type from its leading bytes.
+
+    Input : raw — the attachment's decoded bytes (may be short or empty)
+    Output: (type_name, allowed_extensions) or (None, None) when the type is
+            not one we recognise. An unknown type is never reported as a
+            mismatch: absence of a signature is not evidence of deception.
+    """
+    for sig, offset, name, exts in MAGIC_SIGNATURES:
+        if len(raw) >= offset + len(sig) and \
+                raw[offset:offset + len(sig)] == sig:
+            return name, exts
+    return None, None
+
+
+def find_double_extension(fname):
+    """Detect a decoy extension in front of an executable one.
+
+    Input : file name, e.g. "fatura.pdf.exe"
+    Output: the pair as a string ("pdf.exe") or None.
+
+    Only the combination matters: "report.2024.xlsx" has two dots but no
+    executable tail, and "setup.exe" is honest about what it is.
+    """
+    parts = fname.lower().rsplit(".", 2)
+    if len(parts) < 3:
+        return None
+    decoy, final = "." + parts[1], "." + parts[2]
+    if decoy in DECOY_EXTENSIONS and final in RISKY_EXTENSIONS:
+        return f"{parts[1]}.{parts[2]}"
+    return None
+
+
+def inspect_archive(raw, fname):
+    """List a ZIP archive's contents and judge what is inside.
+
+    Input : raw   — the archive bytes
+            fname — the attachment name, used only for messages
+    Output: dict describing the archive, or None when the bytes are not a
+            readable ZIP:
+              {"entry_count", "entries" (first 25 names), "risky_entries",
+               "encrypted", "nested_archive", "truncated"}
+
+    Only ZIP is handled, because it is the one container the standard library
+    can open. RAR and 7z are reported by magic-byte type but not expanded —
+    that is noted rather than silently skipped.
+
+    Encryption matters: a password-protected archive (with the password
+    helpfully supplied in the email body) is the standard way to smuggle
+    malware past scanners, so it is surfaced even though the contents cannot
+    be read.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+        infos = zf.infolist()
+    except Exception:
+        return None
+
+    names = [i.filename for i in infos]
+    # Bit 0x1 of the general-purpose flag marks an encrypted entry.
+    encrypted = any(i.flag_bits & 0x1 for i in infos)
+    risky, nested = [], []
+    for n in names:
+        low = n.lower()
+        ext = ("." + low.rsplit(".", 1)[-1]) if "." in low else ""
+        if ext in ARCHIVE_INNER_RISKY:
+            risky.append(n)
+        if ext in {".zip", ".rar", ".7z", ".gz", ".iso", ".img"}:
+            nested.append(n)
+    return {
+        "entry_count": len(names),
+        "entries": names[:25],
+        "truncated": len(names) > 25,
+        "risky_entries": risky[:25],
+        "encrypted": encrypted,
+        "nested_archive": nested[:10],
+    }
 
 
 def refang(text: str) -> str:
@@ -350,6 +489,7 @@ def extract_from_parsed_email(parsed: dict, store: IOCStore,
         fname = att.get("filename") or ""
         ext = ("." + fname.rsplit(".", 1)[-1].lower()) if "." in fname else ""
         sha256 = None
+        raw = None
         data_b64 = att.get("data_base64")
         if data_b64:
             # SHA256 of the raw attachment bytes — directly consumable by
@@ -360,12 +500,47 @@ def extract_from_parsed_email(parsed: dict, store: IOCStore,
                 store.add_hash(sha256, "sha256", "attachment")
             except Exception:
                 warnings.append(f"attachment '{fname}': base64 decode failed")
+        # --- Content-based checks (only possible when bytes are present) --
+        # Each of these looks at what the file IS rather than what it is
+        # called, so none of them can be defeated by renaming.
+        magic_type = None
+        extension_mismatch = None
+        archive = None
+        if raw is not None:
+            magic_type, allowed = identify_magic(raw)
+            if magic_type and ext and ext not in allowed:
+                # Known type, but the extension is not one that type uses.
+                extension_mismatch = (
+                    f"declared '{ext}' but the content is {magic_type}")
+            if magic_type in ("zip-container", "rar-archive", "7z-archive"):
+                archive = inspect_archive(raw, fname)
+                if archive is None and magic_type != "zip-container":
+                    # RAR/7z cannot be expanded with the standard library.
+                    archive = {"entry_count": None, "entries": [],
+                               "truncated": False, "risky_entries": [],
+                               "encrypted": None, "nested_archive": [],
+                               "note": f"{magic_type} contents not inspected "
+                                       "(no stdlib reader)"}
+
+        double_ext = find_double_extension(fname)
+        bidi = any(ch in BIDI_CONTROLS for ch in fname)
+
         attachments_out.append({
             "filename": fname or None,
             "content_type": att.get("content_type"),
             "size_bytes": att.get("size_bytes"),
             "sha256": sha256,
             "risky_extension": ext in RISKY_EXTENSIONS,
+            # Real type from the leading bytes; None when unrecognised.
+            "magic_type": magic_type,
+            # Set when the extension contradicts the content.
+            "extension_mismatch": extension_mismatch,
+            # "pdf.exe" style decoy, or None.
+            "double_extension": double_ext,
+            # Bidirectional-override characters hiding the real extension.
+            "bidi_filename": bidi,
+            # ZIP listing: contents, risky entries, encryption flag.
+            "archive": archive,
         })
     return sender_info, attachments_out
 

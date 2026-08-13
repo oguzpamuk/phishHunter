@@ -21,7 +21,7 @@ Pipeline position: **email-parser → ioc-extractor → ioc-orchestrator / whois
 | URLs | From plain text **and** HTML `href`/`src` attributes (hidden links) |
 | Hashes | MD5 / SHA1 / SHA256 found in text + SHA256 computed for attachments |
 | Emails | From/Reply-To/Return-Path and any address in the body |
-| Attachments | Filename, type, size, SHA256 (if bytes present), `risky_extension` flag |
+| Attachments | Filename, type, size, SHA256, plus content-based checks: real type from magic bytes, extension/content mismatch, double extensions, RTL filenames, and ZIP listing with encryption and risky-entry flags |
 
 Defanged indicators (`hxxp://`, `evil[.]com`, `user[at]host`) are refanged
 automatically. Each IOC carries a `sources` list showing *where* in the email
@@ -71,8 +71,18 @@ To also get attachment SHA256 hashes, run the parser with
     "hashes":  [{"value": "44d8...", "algo": "md5", "sources": ["body"]}],
     "emails":  [{"value": "ceo@evil.com", "sources": ["reply_to"]}]
   },
-  "attachments": [{"filename": "inv.docm", "content_type": "...", "size_bytes": 123,
-                   "sha256": "ab12...", "risky_extension": true}],
+  "attachments": [{
+     "filename": "inv.docm", "content_type": "...", "size_bytes": 123,
+     "sha256": "ab12...", "risky_extension": true,
+     "magic_type": "zip-container",       // real type from the leading bytes
+     "extension_mismatch": null,          // set when content contradicts the name
+     "double_extension": null,            // e.g. "pdf.exe"
+     "bidi_filename": false,              // U+202E-style name disguise
+     "archive": {                         // ZIP only; null for other files
+       "entry_count": 2, "entries": ["doc.pdf", "payload.exe"],
+       "risky_entries": ["payload.exe"], "encrypted": false,
+       "nested_archive": [], "truncated": false}
+  }],
   "sender": {"email": "ceo@evil.com", "domain": "evil.com"},
   "counts": {"ips": 1, "domains": 1, "urls": 1, "hashes": 1, "emails": 1, "attachments": 1},
   "warnings": []
