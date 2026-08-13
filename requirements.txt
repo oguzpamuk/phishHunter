@@ -2,5 +2,13 @@
 requests>=2.28
 # PDF report generation (skills/email-triage-pipeline/scripts/report_to_pdf.py):
 reportlab>=4.0
+
+# --- Optional -------------------------------------------------------------
+# YARA scanning stage (--yara-rules). Not installed by default because it
+# needs a compiled extension; install it only if you use your own rules:
+#   pip install yara-python
+# yara-python>=4.3
+
 # Everything else — parser, header analyzer, anomaly detector, IOC extractor,
-# whois, and the pipeline itself — is pure Python standard library.
+# whois, the pipeline itself, and the entire web UI — is pure Python standard
+# library. No Flask, no npm.

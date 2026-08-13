@@ -1,18 +1,30 @@
 Return-Path: <bounce@mail-secure-login.xyz>
-Received: from mx1.company.com (mx1.company.com [203.0.113.10]) by inbox.company.com; Fri, 17 Jul 2026 07:22:40 +0000
-Received: from mail-secure-login.xyz (unknown [198.51.100.7]) by mx1.company.com; Fri, 17 Jul 2026 07:22:35 +0000
-From: "PayPal Security" <security@paypal.com>
+Received: from mx1.company.example (mx1.company.example [203.0.113.10]) by inbox.company.example; Fri, 17 Jul 2026 07:22:40 +0000
+Received: from mail-secure-login.xyz (unknown [198.51.100.7]) by mx1.company.example; Fri, 17 Jul 2026 07:22:35 +0000
+From: "GlobalPay Security" <security@globalpay.example>
 Reply-To: recover@mail-secure-login.xyz
-To: victim@company.com
-Subject: Urgent: Your PayPal account is suspended - verify now!
+To: victim@company.example
+Subject: Urgent: Your GlobalPay account is suspended - verify now!
 Date: Fri, 17 Jul 2026 10:22:31 +0300
 Message-ID: <abc123@mail-secure-login.xyz>
-Authentication-Results: mx1.company.com; spf=fail smtp.mailfrom=mail-secure-login.xyz; dkim=fail; dmarc=fail
+Authentication-Results: mx1.company.example; spf=fail smtp.mailfrom=mail-secure-login.xyz; dkim=fail; dmarc=fail
 MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BOUND"
+
+--BOUND
 Content-Type: text/html; charset=utf-8
 
 <html><body>
-<p>Dear customer, your PayPal account has been SUSPENDED!</p>
-<p>Click <a href="http://mail-secure-login.xyz/paypal/verify?id=44d88612fea8a8f36de82e1278abb02f">here</a> to verify immediately or your account will be deleted within 24 hours!!!</p>
+<p>Dear customer, your GlobalPay account has been SUSPENDED!</p>
+<p>Click <a href="http://mail-secure-login.xyz/globalpay/verify?id=44d88612fea8a8f36de82e1278abb02f">here</a> to verify immediately or your account will be deleted within 24 hours!!!</p>
 <p>Please verify your account now. Also see hxxp://evil-backup[.]top/restore</p>
 </body></html>
+
+--BOUND
+Content-Type: application/vnd.ms-word.document.macroEnabled.12; name="invoice.docm"
+Content-Disposition: attachment; filename="invoice.docm"
+Content-Transfer-Encoding: base64
+
+UEsDBBQABgAIAAAAIQBBdXRvT3BlbiB2YmFQcm9qZWN0LmJpbiBtYWNybyBwYXlsb2Fk
+
+--BOUND--

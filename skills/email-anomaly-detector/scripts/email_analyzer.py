@@ -139,6 +139,11 @@ SPAM_PATTERNS = [
 # or with links that do not belong to the brand (checked later).
 # Mapping: canonical brand name -> tuple of legitimate domain suffixes.
 KNOWN_BRANDS = {
+    # Fictional brand used only by examples/sample_phishing.eml so the shipped
+    # demo exercises brand-impersonation detection without naming a real
+    # company. ".example" is reserved for documentation by RFC 2606, so this
+    # entry can never collide with a real domain. Safe to delete.
+    "globalpay":  ("globalpay.example",),
     # Global tech / e-commerce
     "paypal":     ("paypal.com",),
     "amazon":     ("amazon.com", "amazon.com.tr"),

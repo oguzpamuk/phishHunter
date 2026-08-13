@@ -1,47 +1,60 @@
 {
   "pipeline_version": "1.0",
-  "input_file": "/home/claude/test_phish.eml",
-  "started_utc": "2026-07-19T07:52:48.486058+00:00",
+  "run_id": "20260813T054345",
+  "input_file": "/home/claude/audit/phishHunter-main/examples/sample_phishing.eml",
+  "started_utc": "2026-08-13T05:43:45.370892+00:00",
   "stages": {
     "parse": {
       "status": "ok",
-      "error": null
+      "error": null,
+      "duration_s": 0.072
     },
     "headers": {
       "status": "ok",
-      "error": null
+      "error": null,
+      "duration_s": 0.056
     },
     "body_anomaly": {
       "status": "ok",
-      "error": null
+      "error": null,
+      "duration_s": 0.048
+    },
+    "yara": {
+      "status": "skipped",
+      "error": null,
+      "duration_s": null
     },
     "ioc_extract": {
       "status": "ok",
-      "error": null
+      "error": null,
+      "duration_s": 0.048
     },
     "intel": {
-      "status": "error",
-      "error": "ioc orchestrator failed (rc=1): ERROR: no API keys set. Export at least one of: VT_API_KEY, ABUSEIPDB_API_KEY, URLSCAN_API_KEY, OTX_API_KEY, HYBRID_ANALYSIS_API_KEY"
+      "status": "skipped",
+      "error": null,
+      "duration_s": null
     },
     "whois": {
-      "status": "ok",
-      "error": null
+      "status": "skipped",
+      "error": null,
+      "duration_s": null
     },
     "ai": {
       "status": "skipped",
-      "error": null
+      "error": null,
+      "duration_s": null
     }
   },
   "email": {
-    "subject": "Urgent: Your PayPal account is suspended - verify now!",
+    "subject": "Urgent: Your GlobalPay account is suspended - verify now!",
     "from": {
-      "name": "PayPal Security",
-      "email": "security@paypal.com"
+      "name": "GlobalPay Security",
+      "email": "security@globalpay.example"
     },
     "to": [
       {
         "name": null,
-        "email": "victim@company.com"
+        "email": "victim@company.example"
       }
     ],
     "date": "2026-07-17T10:22:31+03:00",
@@ -57,9 +70,9 @@
     },
     "identity": {
       "from": {
-        "name": "PayPal Security",
-        "email": "security@paypal.com",
-        "domain": "paypal.com"
+        "name": "GlobalPay Security",
+        "email": "security@globalpay.example",
+        "domain": "globalpay.example"
       },
       "reply_to": {
         "name": null,
@@ -81,7 +94,7 @@
       "spf": "fail",
       "dkim": "fail",
       "dmarc": "fail",
-      "raw_authentication_results": "mx1.company.com; spf=fail smtp.mailfrom=mail-secure-login.xyz; dkim=fail; dmarc=fail",
+      "raw_authentication_results": "mx1.company.example; spf=fail smtp.mailfrom=mail-secure-login.xyz; dkim=fail; dmarc=fail",
       "raw_received_spf": null
     },
     "routing": {
@@ -91,7 +104,7 @@
         {
           "from_host": "mail-secure-login.xyz",
           "from_ip": "198.51.100.7",
-          "by_host": "mx1.company.com;",
+          "by_host": "mx1.company.example;",
           "timestamp": "2026-07-17T07:22:35+00:00",
           "delay_seconds": null,
           "flags": [
@@ -101,9 +114,9 @@
           "index": 1
         },
         {
-          "from_host": "mx1.company.com",
+          "from_host": "mx1.company.example",
           "from_ip": "203.0.113.10",
-          "by_host": "inbox.company.com;",
+          "by_host": "inbox.company.example;",
           "timestamp": "2026-07-17T07:22:40+00:00",
           "delay_seconds": 5,
           "flags": [
@@ -117,12 +130,12 @@
       {
         "severity": "critical",
         "code": "REPLY_TO_MISMATCH",
-        "message": "Reply-To domain (mail-secure-login.xyz) differs from From domain (paypal.com) — replies are diverted to a different party, a classic phishing pattern."
+        "message": "Reply-To domain (mail-secure-login.xyz) differs from From domain (globalpay.example) — replies are diverted to a different party, a classic phishing pattern."
       },
       {
         "severity": "warning",
         "code": "RETURN_PATH_MISALIGNED",
-        "message": "Return-Path domain (mail-secure-login.xyz) does not match From domain (paypal.com) — possible spoofing or a bulk-mailing service."
+        "message": "Return-Path domain (mail-secure-login.xyz) does not match From domain (globalpay.example) — possible spoofing or a bulk-mailing service."
       },
       {
         "severity": "info",
@@ -152,13 +165,13 @@
     ]
   },
   "body_analysis": {
-    "source": "/tmp/email_triage_ne3urf4o/body.txt",
-    "spam_score": 32,
-    "anomaly_score": 31,
+    "source": "/tmp/email_triage_fqjs584t/body.txt",
+    "spam_score": 44,
+    "anomaly_score": 36,
     "verdict": "SUSPICIOUS",
     "brands_detected": [
       {
-        "brand": "paypal",
+        "brand": "globalpay",
         "mention_count": 1,
         "impersonation_risk": "medium",
         "reasons": [
@@ -182,6 +195,12 @@
       },
       {
         "category": "spam",
+        "name": "verification lure",
+        "detail": "matched text: 'verify your account'",
+        "points": 12
+      },
+      {
+        "category": "spam",
         "name": "impersonal greeting",
         "detail": "matched text: 'Dear customer'",
         "points": 6
@@ -189,24 +208,25 @@
       {
         "category": "spam",
         "name": "exclamation overload",
-        "detail": "4 '!' in 25 words",
+        "detail": "4 '!' in 30 words",
         "points": 6
       },
       {
         "category": "brand",
-        "name": "possible impersonation of 'paypal'",
+        "name": "possible impersonation of 'globalpay'",
         "detail": "credential/verification language near brand mention; urgency language combined with brand mention",
         "points": 30
       }
     ],
     "stats": {
-      "char_count": 195,
-      "word_count": 25,
-      "caps_ratio": 0.099,
+      "char_count": 230,
+      "word_count": 30,
+      "caps_ratio": 0.088,
       "exclamation_count": 4,
       "url_count": 0
     }
   },
+  "yara": null,
   "iocs": {
     "input_kind": "parsed_email",
     "iocs": {
@@ -219,7 +239,13 @@
           ]
         },
         {
-          "value": "inbox.company.com",
+          "value": "globalpay.example",
+          "sources": [
+            "from"
+          ]
+        },
+        {
+          "value": "inbox.company.example",
           "sources": [
             "headers"
           ]
@@ -234,15 +260,9 @@
           ]
         },
         {
-          "value": "mx1.company.com",
+          "value": "mx1.company.example",
           "sources": [
             "headers"
-          ]
-        },
-        {
-          "value": "paypal.com",
-          "sources": [
-            "from"
           ]
         }
       ],
@@ -254,7 +274,7 @@
           ]
         },
         {
-          "value": "http://mail-secure-login.xyz/paypal/verify?id=44d88612fea8a8f36de82e1278abb02f",
+          "value": "http://mail-secure-login.xyz/globalpay/verify?id=44d88612fea8a8f36de82e1278abb02f",
           "sources": [
             "html"
           ]
@@ -262,7 +282,7 @@
       ],
       "hashes": [
         {
-          "value": "c0d27331415b6dbe825cccdcf27b1198a07f321e66386d3d5cb4cb8d9735a81f",
+          "value": "a4b1cc65d02c96e836779a2e7520e604e232581cc7f9e49d78fa56d71cd9bd63",
           "algo": "sha256",
           "sources": [
             "attachment"
@@ -283,7 +303,7 @@
           ]
         },
         {
-          "value": "security@paypal.com",
+          "value": "security@globalpay.example",
           "sources": [
             "from"
           ]
@@ -293,15 +313,15 @@
     "attachments": [
       {
         "filename": "invoice.docm",
-        "content_type": "application/octet-stream",
-        "size_bytes": 14,
-        "sha256": "c0d27331415b6dbe825cccdcf27b1198a07f321e66386d3d5cb4cb8d9735a81f",
+        "content_type": "application/vnd.ms-word.document.macroenabled.12",
+        "size_bytes": 51,
+        "sha256": "a4b1cc65d02c96e836779a2e7520e604e232581cc7f9e49d78fa56d71cd9bd63",
         "risky_extension": true
       }
     ],
     "sender": {
-      "email": "security@paypal.com",
-      "domain": "paypal.com"
+      "email": "security@globalpay.example",
+      "domain": "globalpay.example"
     },
     "counts": {
       "ips": 0,
@@ -316,42 +336,21 @@
     ]
   },
   "intel": null,
-  "whois": {
-    "paypal.com": {
-      "query": "paypal.com",
-      "error": "network error: [Errno 97] Address family not supported by protocol"
-    },
-    "evil-backup.top": {
-      "query": "evil-backup.top",
-      "error": "network error: [Errno 97] Address family not supported by protocol"
-    },
-    "inbox.company.com": {
-      "query": "inbox.company.com",
-      "error": "network error: [Errno 97] Address family not supported by protocol"
-    },
-    "mail-secure-login.xyz": {
-      "query": "mail-secure-login.xyz",
-      "error": "network error: [Errno 97] Address family not supported by protocol"
-    },
-    "mx1.company.com": {
-      "query": "mx1.company.com",
-      "error": "network error: [Errno 97] Address family not supported by protocol"
-    }
-  },
+  "whois": null,
   "verdict": {
     "verdict": "suspicious",
-    "score": 51.2,
+    "score": 52.2,
     "confidence": "medium",
     "signals": [
       {
         "signal": "header_risk",
         "points": 30.0,
-        "detail": "header risk_score=100; critical: Reply-To domain (mail-secure-login.xyz) differs from From domain (paypal.com) — replies are diverted to a different party, a classic phishing pattern.; SPF check failed (fail) — the sending server is not authorized / the signature is invalid.; DKIM check failed (fail) — the sending server is not authorized / the signature is invalid."
+        "detail": "header risk_score=100; critical: Reply-To domain (mail-secure-login.xyz) differs from From domain (globalpay.example) — replies are diverted to a different party, a classic phishing pattern.; SPF check failed (fail) — the sending server is not authorized / the signature is invalid.; DKIM check failed (fail) — the sending server is not authorized / the signature is invalid."
       },
       {
         "signal": "body_anomaly",
-        "points": 6.2,
-        "detail": "body anomaly score=31.0; verdict=SUSPICIOUS"
+        "points": 7.2,
+        "detail": "body anomaly score=36.0; verdict=SUSPICIOUS"
       },
       {
         "signal": "risky_attachment",
@@ -365,5 +364,5 @@
       }
     ]
   },
-  "finished_utc": "2026-07-19T07:53:39.048760+00:00"
+  "finished_utc": "2026-08-13T05:43:45.596573+00:00"
 }
