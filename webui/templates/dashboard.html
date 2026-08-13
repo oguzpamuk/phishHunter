@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phishHunter — Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="nav">
+    <div class="brand"><span class="fish">phish</span>Hunter</div>
+    <a class="item active" href="/"><span class="dot"></span>Dashboard</a>
+    <a class="item" href="/analyze"><span class="dot"></span>New analysis</a>
+    <a class="item" href="/history"><span class="dot"></span>History</a>
+    <div class="spacer"></div>
+    <div class="foot">local console · v1.0</div>
+  </nav>
+
+  <main class="main">
+    <h1 class="page-title">Dashboard</h1>
+    <p class="page-sub">Email triage at a glance — verdicts, activity, and the latest runs.</p>
+
+    <!-- Counters -->
+    <div class="grid cols-4" id="tiles">
+      <div class="card stat"><div class="num" id="n-total">–</div><div class="lbl">Total analyses</div></div>
+      <div class="card stat malicious"><div class="num" id="n-mal">–</div><div class="lbl">Malicious</div></div>
+      <div class="card stat suspicious"><div class="num" id="n-sus">–</div><div class="lbl">Suspicious</div></div>
+      <div class="card stat clean"><div class="num" id="n-clean">–</div><div class="lbl">Clean</div></div>
+    </div>
+
+    <!-- Verdict spectrum -->
+    <div class="card" style="margin-top:16px">
+      <div class="spectrum" id="spectrum" aria-label="Verdict distribution">
+        <div class="seg m" style="flex:1"></div>
+        <div class="seg s" style="flex:1"></div>
+        <div class="seg c" style="flex:1"></div>
+      </div>
+      <div class="spectrum-legend">
+        <span><b id="p-mal">0%</b> malicious</span>
+        <span><b id="p-sus">0%</b> suspicious</span>
+        <span><b id="p-clean">0%</b> clean</span>
+        <span style="margin-left:auto" id="running-note"></span>
+      </div>
+    </div>
+
+    <!-- Recent analyses -->
+    <div class="grid cols-2" style="margin-top:16px; grid-template-columns: 2fr 1fr;">
+      <div class="card">
+        <h2 style="margin:0 0 8px; font-size:16px;">Recent analyses</h2>
+        <table class="list" id="recent">
+          <thead><tr><th>File</th><th>Verdict</th><th>Score</th><th>When</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty" id="recent-empty" style="display:none">
+          No analyses yet — upload your first email to start hunting.
+        </div>
+      </div>
+      <div class="card">
+        <h2 style="margin:0 0 8px; font-size:16px;">Quick start</h2>
+        <p style="color:var(--muted); font-size:14px; margin:0 0 14px;">
+          Drop a suspicious <span class="mono">.eml</span> or
+          <span class="mono">.msg</span> and get a scored, explainable
+          verdict with a full evidence trail.
+        </p>
+        <a class="btn" href="/analyze">Analyze an email</a>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+/* Dashboard controller: pulls /api/stats, fills tiles + spectrum + recent
+   table, and auto-refreshes every 5s so live runs update the counters. */
+const fmtTime = iso => {
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {month:"short", day:"numeric",
+                                      hour:"2-digit", minute:"2-digit"});
+};
+const badge = row => {
+  if (row.status === "running") return '<span class="badge running">running</span>';
+  if (row.status === "error")   return '<span class="badge error">error</span>';
+  return `<span class="badge ${row.verdict}">${row.verdict||"?"}</span>`;
+};
+
+async function refresh() {
+  const r = await fetch("/api/stats");
+  const {counts, recent} = await r.json();
+  const set = (id, v) => document.getElementById(id).textContent = v;
+  set("n-total", counts.total); set("n-mal", counts.malicious);
+  set("n-sus", counts.suspicious); set("n-clean", counts.clean);
+
+  const done = counts.malicious + counts.suspicious + counts.clean;
+  const pct = n => done ? Math.round(100 * n / done) : 0;
+  set("p-mal", pct(counts.malicious) + "%");
+  set("p-sus", pct(counts.suspicious) + "%");
+  set("p-clean", pct(counts.clean) + "%");
+  const spec = document.getElementById("spectrum");
+  spec.children[0].style.flex = counts.malicious || 0.02;
+  spec.children[1].style.flex = counts.suspicious || 0.02;
+  spec.children[2].style.flex = counts.clean || 0.02;
+  document.getElementById("running-note").textContent =
+    counts.running ? `${counts.running} running now` : "";
+
+  const tbody = document.querySelector("#recent tbody");
+  tbody.innerHTML = "";
+  document.getElementById("recent-empty").style.display =
+      recent.length ? "none" : "block";
+  for (const row of recent) {
+    const tr = document.createElement("tr");
+    tr.className = "row";
+    tr.innerHTML = `<td class="mono">${row.filename}</td>
+                    <td>${badge(row)}</td>
+                    <td class="score">${row.score ?? "–"}</td>
+                    <td style="color:var(--muted)">${fmtTime(row.created_utc)}</td>`;
+    tr.onclick = () => location.href =
+        row.status === "running" ? `/analyze?id=${row.id}` : `/report/${row.id}`;
+    tbody.appendChild(tr);
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

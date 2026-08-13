@@ -1,61 +1,78 @@
-# 📧 Email Security Triage Toolkit
+# 🎣 phishHunter — Email Security AI Triage Toolkit
 
-**AI-assisted, end-to-end email threat analysis — built as modular [Claude Agent Skills](https://docs.claude.com/en/docs/agents-and-tools/agent-skills) that also run standalone from the command line.**
+**AI-assisted, end-to-end email threat analysis — a modular pipeline that runs from the command line, as [Claude Agent Skills](https://docs.claude.com/en/docs/agents-and-tools/agent-skills), or from a local web console.**
 
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Skills](https://img.shields.io/badge/agent%20skills-13-orange)
 ![Dependencies](https://img.shields.io/badge/deps-requests%20%C2%B7%20reportlab-brightgreen)
-![Platform](https://img.shields.io/badge/platform-Claude.ai%20%7C%20Claude%20Code%20%7C%20CLI-lightgrey)
+![Platform](https://img.shields.io/badge/platform-CLI%20%7C%20Web%20UI%20%7C%20Claude-lightgrey)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 
 Give it a suspicious `.eml` or `.msg` file — get back a full SOC-style investigation and a weighted **malicious / suspicious / clean** verdict, with every signal explained.
+
+![phishHunter web console](docs/screenshots/01-dashboard.png)
 
 ---
 
 ## 🏗 Architecture
 
 ```
-                              .eml / .msg
-                                   │
-                                   ▼
-                        ┌─────────────────────┐
-                        │  1. email-parser     │  structured JSON
-                        └──────────┬──────────┘  (headers, body, attachments)
-              ┌────────────────────┼────────────────────┐
-              ▼                    ▼                    ▼
- ┌────────────────────┐ ┌──────────────────────┐ ┌───────────────────┐
- │ 2. email-header-   │ │ 3. email-anomaly-    │ │ 4. ioc-extractor  │
- │    analyzer        │ │    detector          │ │  IPs · domains    │
- │ SPF/DKIM/DMARC     │ │ spam score, brand    │ │  URLs · hashes    │
- │ spoofing, routing  │ │ impersonation        │ │  attachment SHA256│
- └─────────┬──────────┘ └──────────┬───────────┘ └────────┬──────────┘
-           │                       │              ┌────────┴─────────┐
-           │                       │              ▼                  ▼
-           │                       │   ┌────────────────────┐ ┌─────────────┐
-           │                       │   │ 5. ioc-orchestrator│ │ 6. whois-   │
-           │                       │   │ VirusTotal         │ │    lookup   │
-           │                       │   │ AbuseIPDB · OTX    │ │ registrar,  │
-           │                       │   │ Hybrid Analysis    │ │ DOMAIN AGE, │
-           │                       │   │ urlscan (parallel) │ │ IP owner    │
-           │                       │   └─────────┬──────────┘ └──────┬──────┘
-           └───────────────────────┴─────────────┴───────────────────┘
-                                   │
-                                   ▼
-                        ┌─────────────────────┐
-                        │ 7. VERDICT ENGINE   │  weighted 0–100 score
-                        │ malicious/suspicious│  + explained signals
-                        │ /clean + confidence │
-                        └──────────┬──────────┘
-                                   ▼  (optional --ai)
-                        ┌─────────────────────┐
-                        │ 8. LLM Analyst      │  Anthropic API assessment
-                        │    Assessment       │  + recommended actions
-                        └──────────┬──────────┘
-                                   ▼  (optional)
-                        ┌─────────────────────┐
-                        │ 9. PDF Report       │  color-coded, shareable
-                        │    Generator        │  analyst deliverable
-                        └─────────────────────┘
+                                    .eml / .msg
+                                         │
+                                         ▼
+                              ┌─────────────────────┐
+                              │  1. email-parser    │  structured JSON
+                              └──────────┬──────────┘  (headers, body, attachments)
+          ┌──────────────────┬──────────┼──────────┬──────────────────┐
+          ▼                  ▼          ▼           ▼                  ▼
+ ┌────────────────┐ ┌────────────────┐  │  ┌────────────────┐ ┌────────────────────┐
+ │ 2. email-      │ │ 3. email-      │  │  │ ✦ email-yara-  │ │ 4. ioc-extractor   │
+ │    header-     │ │    anomaly-    │  │  │    scanner     │ │  IPs · domains     │
+ │    analyzer    │ │    detector    │  │  │  (optional,    │ │  URLs · hashes     │
+ │ SPF/DKIM/DMARC │ │ spam score,    │  │  │  --yara-rules) │ │  attachment SHA256 │
+ │ spoofing,      │ │ brand          │  │  │ your rules vs. │ │                    │
+ │ routing        │ │ impersonation  │  │  │ every layer    │ │                    │
+ └───────┬────────┘ └───────┬────────┘  │  └───────┬────────┘ └─────────┬──────────┘
+         │                  │           │          │          ┌─────────┴─────────┐
+         │                  │           │          │          ▼                   ▼
+         │                  │           │          │  ┌────────────────┐ ┌──────────────┐
+         │                  │           │          │  │ 5. ioc-        │ │ 6. whois-    │
+         │                  │           │          │  │  orchestrator  │ │    lookup    │
+         │                  │           │          │  │ VirusTotal ·   │ │ registrar,   │
+         │                  │           │          │  │ AbuseIPDB ·    │ │ DOMAIN AGE,  │
+         │                  │           │          │  │ OTX · Hybrid · │ │ IP owner     │
+         │                  │           │          │  │ urlscan ∥      │ │              │
+         │                  │           │          │  └───────┬────────┘ └──────┬───────┘
+         └──────────────────┴───────────┴──────────┴──────────┴─────────────────┘
+                                         │
+                                         ▼
+                              ┌─────────────────────┐
+                              │  7. VERDICT ENGINE  │  weighted 0–100 score
+                              │  malicious /        │  + explained signals
+                              │  suspicious / clean │  (YARA hit = strong signal)
+                              └──────────┬──────────┘
+                                         ▼  (optional --ai)
+                              ┌─────────────────────┐
+                              │  8. LLM Analyst     │  Anthropic API assessment
+                              │     Assessment      │  + recommended actions
+                              └──────────┬──────────┘
+                                         ▼  (optional)
+                              ┌─────────────────────┐
+                              │  9. PDF Report      │  color-coded, shareable
+                              │     Generator       │  analyst deliverable
+                              └─────────────────────┘
+
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │  LOGGING & AUDIT TRAIL  —  wraps every stage: start, end, duration,       │
+   │  skip-reason, error.  Streamed to stderr and an optional JSON-Lines       │
+   │  --log-file (SIEM-ready), with a one-line pipeline_end run summary.       │
+   └───────────────────────────────────────────────────────────────────────────┘
 ```
+
+Stages **2, 3, ✦ (YARA), and 4** run off the parsed email; **5 & 6** enrich
+the IOCs that stage 4 extracts. The **✦ YARA** stage is optional — it only
+runs when you pass `--yara-rules` — and a rule match feeds the verdict engine
+as one of its strongest signals.
 
 Every stage is **fail-soft**: missing API keys, no network, or an absent skill never aborts the run — the report records what was skipped and the verdict confidence is lowered accordingly.
 
@@ -77,7 +94,7 @@ Every stage is **fail-soft**: missing API keys, no network, or an absent skill n
 | [`alienvault-otx`](skills/alienvault-otx) | OTX pulse / campaign intelligence | yes | `requests` |
 | [`hybrid-analysis`](skills/hybrid-analysis) | Falcon Sandbox hash lookups & detonation | yes | `requests` |
 | [`urlscan`](skills/urlscan) | Live URL scans + historical search | yes | `requests` |
-| [`email-yara-scanner`](skills/email-yara-scanner) | Scan emails against user YARA rules | no | `yara-python` |
+| [`email-yara-scanner`](skills/email-yara-scanner) | Optional pipeline stage — scan every email layer against your YARA rules | no | `yara-python` |
 
 Each skill folder follows the standard Agent Skill layout — a `SKILL.md` (YAML frontmatter + instructions) plus self-contained CLI scripts under `scripts/` with detailed English comments documenting inputs, outputs, and exit codes.
 
@@ -88,8 +105,8 @@ Each skill folder follows the standard Agent Skill layout — a `SKILL.md` (YAML
 ### Option A — Standalone CLI (no Claude required)
 
 ```bash
-git clone https://github.com/<you>/email-security-triage.git
-cd email-security-triage
+git clone https://github.com/oguzpamuk/phishHunter.git
+cd phishHunter
 pip install -r requirements.txt          # only `requests`, for the intel stage
 
 # Export whichever intel API keys you have (all optional — missing ones are skipped)
@@ -118,6 +135,11 @@ python3 skills/email-triage-pipeline/scripts/triage_pipeline.py \
 
 # Turn the JSON report into a polished, color-coded PDF
 python3 skills/email-triage-pipeline/scripts/report_to_pdf.py report.json -o report.pdf
+
+# Optionally scan with your own YARA rules as part of the pipeline
+pip install yara-python
+python3 skills/email-triage-pipeline/scripts/triage_pipeline.py \
+    suspicious.eml --skills-root skills --yara-rules /opt/yara-rules/ -o report.json
 ```
 
 Try it immediately with the bundled sample:
@@ -135,6 +157,76 @@ Install each skill folder as an Agent Skill (upload the folder or a packaged `.s
 > *"Is this email malicious?"* (attach the `.eml`/`.msg`)
 
 Claude runs the whole pipeline and acts as the final AI analyst layer — reasoning over the collected evidence, agreeing or disagreeing with the heuristic verdict, and recommending actions.
+
+### Option C — Web UI (local analyst console)
+
+A zero-dependency web console built entirely on the Python standard library —
+no Flask, no npm, nothing to install.
+
+```bash
+git clone https://github.com/oguzpamuk/phishHunter.git
+cd phishHunter
+
+# Optional — only if you want threat intel and PDF export
+pip install -r requirements.txt
+
+# Optional — export whichever intel keys you have (missing sources are skipped)
+export VT_API_KEY="..." ABUSEIPDB_API_KEY="..." OTX_API_KEY="..."
+export ANTHROPIC_API_KEY="..."          # only for the AI analyst toggle
+
+# Start the console
+python3 webui/app.py
+```
+
+Then open **http://127.0.0.1:8787**.
+
+Useful flags:
+
+```bash
+python3 webui/app.py --port 9000          # use a port other than the default 8787
+python3 webui/app.py --host 0.0.0.0       # expose on the LAN (see warning below)
+python3 webui/app.py --skills-root /path/to/skills   # non-standard skill location
+```
+
+The server prints its URL, the skills root it resolved, and its data directory
+on startup. Stop it with `Ctrl-C`. Everything it writes — uploads, JSON
+reports, audit logs, and the SQLite index — lives under `webui/data/`; delete
+that folder to reset the console to a clean state.
+
+| Page | What it does |
+|---|---|
+| **Dashboard** (`/`) | Verdict distribution spectrum, totals, live "running" counter, recent analyses |
+| **New analysis** (`/analyze`) | Drag-&-drop an `.eml`/`.msg`, toggle intel / WHOIS / AI / YARA (upload your own rules), then watch a **live stage rail** — every pipeline stage lights up as it runs, with durations, skip reasons, and errors streamed straight from the audit log |
+| **Report** (`/report/{id}`) | The full evidence report in the browser: verdict banner, risk signals, header findings, YARA matches, IOCs, per-source threat intel, WHOIS ages, AI assessment, and the stage audit trail |
+| **History** (`/history`) | Every past analysis, filterable by verdict (malicious / suspicious / clean / errors / running) and searchable by filename |
+
+The live progress view is powered by the pipeline's own structured logging —
+the UI tails the JSON-Lines audit log, so what you see is exactly what ran.
+Analyses are indexed in a local SQLite database under `webui/data/`
+(uploads, reports, and logs live there too; delete the folder to reset).
+
+**Dashboard** — verdict distribution, totals, and the latest runs at a glance:
+
+![phishHunter dashboard](docs/screenshots/01-dashboard.png)
+
+**Live pipeline progress** — every stage reports as it runs, with durations,
+skip reasons, and errors streamed straight from the audit log:
+
+![Live pipeline progress](docs/screenshots/02-analyze-progress.png)
+
+**Report** — the full evidence trail in the browser: colour-coded verdict,
+scored risk signals, header findings by severity, YARA matches, IOCs,
+threat intel, WHOIS ages, and the stage audit trail:
+
+![Analysis report](docs/screenshots/03-report.png)
+
+**History** — filter past analyses by verdict or search by filename:
+
+![Analysis history](docs/screenshots/04-history.png)
+
+> 🔒 The console binds to `127.0.0.1` by default and has no authentication —
+> it is a single-analyst workstation tool. Put an authenticated reverse
+> proxy in front of it before exposing it on a network.
 
 ---
 
@@ -178,7 +270,10 @@ See [`examples/sample_triage_report.pdf`](examples/sample_triage_report.pdf) for
 | Signal | Points |
 |---|---|
 | Threat intel: any IOC rated **malicious** | +60 |
+| YARA rule match — **high/critical** severity | +50 |
 | Threat intel: any IOC rated **suspicious** | +25 |
+| YARA rule match — **medium** severity | +25 |
+| YARA rule match — low / unspecified severity | +12 |
 | Header risk score (spoofing / auth failures) | ×0.30 (max 30) |
 | Body anomaly score (spam / brand impersonation) | ×0.20 (max 20) |
 | Domain registered **< 30 days** ago | +15 |
@@ -206,6 +301,110 @@ for f in *.eml; do
       --skills-root skills -o "$f.report.json" || echo "⚠️  FLAG: $f"
 done
 ```
+
+---
+
+## 📝 Logging & audit trail
+
+Every run logs its progress to **stderr** (stdout stays a clean JSON/verdict
+stream you can pipe). Each stage records a start event, an end event with its
+outcome and wall-clock duration, and skips are logged with the reason — so you
+can see exactly **which stages ran, what was skipped and why, and where it
+failed**.
+
+```bash
+# Human-readable console logs (default)
+python3 skills/email-triage-pipeline/scripts/triage_pipeline.py mail.eml --skills-root skills
+
+# Persist a structured JSON-Lines audit log (one event per line) — SIEM-ready
+python3 skills/email-triage-pipeline/scripts/triage_pipeline.py mail.eml \
+    --skills-root skills --log-file logs/run.log
+
+# JSON logs on the console too, at DEBUG (also logs each sub-skill command)
+python3 skills/email-triage-pipeline/scripts/triage_pipeline.py mail.eml \
+    --skills-root skills --log-json --log-level DEBUG
+
+# Silence the console except warnings/errors (a --log-file still captures all)
+python3 skills/email-triage-pipeline/scripts/triage_pipeline.py mail.eml \
+    --skills-root skills --quiet --log-file logs/run.log
+```
+
+| Flag | Effect |
+|---|---|
+| `--log-file FILE` | Write a JSON-Lines audit log (parent dirs auto-created). Always JSON, even without `--log-json`. |
+| `--log-level LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` (default `INFO`). `DEBUG` also logs each sub-skill's exact command line + return code. |
+| `--log-json` | Emit JSON-Lines on the console too (default console output is concise text). |
+| `--quiet` | Silence the console below `WARNING`; a `--log-file` still records everything. |
+
+Console output looks like this:
+
+```
+18:06:44 INFO    [triage] parse ok in 0.12s
+18:06:44 INFO    [triage] headers ok in 0.06s
+18:06:44 ERROR   [triage] yara error in 0.07s
+18:06:44 INFO    [triage] intel skipped (flag)
+18:06:44 INFO    [triage] pipeline finished
+```
+
+Every record carries a `run_id` (a UTC timestamp) so a single run can be
+grepped out of a shared log file, and the same per-stage timings are persisted
+into each report's `stages` object under a `duration_s` key. The final
+`pipeline_end` record is the one line that summarises the whole run:
+
+```json
+{"event":"pipeline_end","run_id":"20260812T090000","verdict":"malicious",
+ "score":92.2,"total_s":3.9,"stages_ok":["parse","headers","body_anomaly",
+ "yara","ioc_extract"],"stages_skipped":["intel","whois","ai"],
+ "stages_error":[],"durations":{"parse":0.19,"headers":0.08,"yara":0.10}}
+```
+
+---
+
+## 🧬 YARA scanning
+
+phishHunter ships a YARA scanner that runs **your own detection rules**
+against every layer of an email — the raw bytes, decoded text and HTML
+bodies, headers, and each attachment. It works two ways.
+
+**As a pipeline stage** (recommended) — pass `--yara-rules` and matches feed
+straight into the verdict engine:
+
+```bash
+pip install yara-python                     # one-time
+
+python3 skills/email-triage-pipeline/scripts/triage_pipeline.py \
+    examples/sample_phishing.eml --skills-root skills \
+    --yara-rules examples/phishing_rules.yar --format text
+```
+
+A rule's `meta.severity` decides its weight: `high`/`critical` adds **+50**,
+`medium` **+25**, low or unspecified **+12** — taken from the single
+most-severe match. One high-severity hit is enough to push a borderline email
+from *suspicious* to *malicious*. Matches appear in the JSON report's `yara`
+object, in the PDF report, and in the web UI report page.
+
+**Standalone**, when you just want to scan without a full triage:
+
+```bash
+# A single rules file
+python3 skills/email-yara-scanner/scripts/scan_email.py \
+    --file suspicious.eml --rules /path/to/rules.yar
+
+# …or a whole directory (every *.yar / *.yara inside is compiled)
+python3 skills/email-yara-scanner/scripts/scan_email.py \
+    --file invoice.msg --rules /opt/yara-rules/ --output result.json
+```
+
+Exit codes: `0` = at least one rule matched · `1` = no match · `2` = error.
+
+`examples/phishing_rules.yar` contains three demo rules to get started —
+replace them with your production logic. phishHunter never authors detection
+rules itself; you bring your own, which is exactly what makes this stage a
+high-confidence signal.
+
+Without `yara-python` installed, or without `--yara-rules`, the stage is
+simply skipped (or recorded as an error) and the pipeline continues — the
+report notes it and lowers its confidence accordingly.
 
 ---
 
@@ -248,6 +447,11 @@ All keys are **optional** — sources without a key are skipped automatically an
 │   ├── virustotal/  abuseipdb/  alienvault-otx/
 │   ├── hybrid-analysis/  urlscan/
 │   └── email-yara-scanner/
+├── webui/                       # Option C — local web console (stdlib-only)
+│   ├── app.py                   #   HTTP server + JSON API + background runner
+│   ├── templates/               #   dashboard · analyze · report · history
+│   ├── static/                  #   design system (style.css)
+│   └── data/                    #   runtime: uploads, reports, logs, SQLite (gitignored)
 └── examples/
     ├── sample_phishing.eml      # synthetic test phishing email
     ├── sample_clean.eml         # synthetic clean email

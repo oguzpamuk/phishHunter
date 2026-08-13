@@ -71,6 +71,29 @@ Output control:
     --format json|text    "text" prints a human-readable analyst summary
                           instead of JSON (default: json).
 
+Logging / audit trail:
+    --log-file FILE       Write a structured JSON-Lines audit log to FILE
+                          (one JSON object per line: stage_start / stage_end /
+                          stage_skip / verdict / pipeline_end events, each
+                          with a stage name, status, and duration_s). The
+                          parent directory is created if needed. Ideal for
+                          SIEM ingestion and after-the-fact investigation of
+                          "what ran, what was skipped, where it failed".
+    --log-level LEVEL     DEBUG | INFO | WARNING | ERROR (default INFO).
+                          DEBUG additionally logs each sub-skill's exact
+                          command line and return code.
+    --log-json            Emit JSON-Lines logs on the console too (default
+                          console output is concise human-readable text; the
+                          --log-file is always JSON regardless).
+    --quiet               Silence the console below WARNING (a --log-file
+                          still captures everything at --log-level).
+
+    All logs go to stderr, so stdout stays a clean JSON/verdict stream that
+    can be piped without contamination. Every record carries a run_id (a
+    UTC timestamp) so one run can be grepped out of a shared log file. The
+    per-stage timings are also persisted into the report's "stages" object
+    under a "duration_s" key.
+
 Environment variables consumed indirectly (by the orchestrator stage):
     VT_API_KEY, ABUSEIPDB_API_KEY, URLSCAN_API_KEY, OTX_API_KEY,
     HYBRID_ANALYSIS_API_KEY — any subset; missing sources are skipped.
@@ -127,14 +150,127 @@ import argparse
 import base64
 import datetime as dt
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 
 PIPELINE_VERSION = "1.0"
+
+# Module-level logger. Handlers are attached in setup_logging() at runtime so
+# that importing this module (e.g. for unit tests) never emits stray output.
+log = logging.getLogger("phishhunter.triage")
+
+
+class JsonLogFormatter(logging.Formatter):
+    """Formatter that emits one JSON object per log record (JSON Lines).
+
+    Used when --log-json is set so logs can be ingested directly by a SIEM
+    (Splunk, Elastic, Sentinel) without regex parsing. Any structured fields
+    attached to a record via `extra={...}` are merged into the JSON object,
+    so stage events carry machine-readable keys (stage, status, duration_s).
+
+    Output (one line per record):
+      {"ts":"2026-08-12T09:00:00Z","level":"INFO","event":"stage_end",
+       "stage":"headers","status":"ok","duration_s":0.42,
+       "msg":"headers completed in 0.42s"}
+    """
+
+    # Standard LogRecord attributes we do NOT copy into the JSON payload;
+    # everything else passed via `extra=` is treated as a structured field.
+    _RESERVED = {
+        "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+        "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+        "created", "msecs", "relativeCreated", "thread", "threadName",
+        "processName", "process", "taskName", "message", "asctime",
+    }
+
+    def format(self, record):
+        payload = {
+            "ts": dt.datetime.fromtimestamp(
+                record.created, dt.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            "level": record.levelname,
+            "msg": record.getMessage(),
+        }
+        # Merge any structured fields attached via extra=.
+        for key, val in record.__dict__.items():
+            if key not in self._RESERVED and not key.startswith("_"):
+                payload[key] = val
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def setup_logging(level_name="INFO", log_file=None, as_json=False,
+                  run_id=None, console_level=None):
+    """Configure the pipeline logger.
+
+    Input:
+      level_name    : "DEBUG"|"INFO"|"WARNING"|"ERROR" — the OVERALL logger
+                      threshold and the file handler's level. Records below
+                      this never exist, on any handler.
+      log_file      : optional path; when given, a FileHandler (always
+                      JSON Lines) is added. Parent directory is created.
+      as_json       : True → JSON Lines on the console too; False → concise
+                      human-readable text on console.
+      run_id        : short correlation id stamped on every record.
+      console_level : optional SEPARATE threshold for the console handler
+                      (used by --quiet to silence the console to WARNING
+                      while the --log-file still records at level_name).
+                      Defaults to level_name.
+
+    Returns the configured logger. Safe to call once per process; existing
+    handlers are cleared first so repeated calls don't duplicate output.
+
+    All logs go to stderr (never stdout), so the pipeline's stdout stays a
+    clean JSON/verdict stream that can be piped without log contamination.
+    """
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    c_level = getattr(logging, (console_level or level_name).upper(),
+                      logging.INFO)
+    # The logger itself must sit at the LOWEST threshold any handler needs,
+    # otherwise records are dropped before handlers ever see them (this is
+    # exactly the --quiet + --log-file trap: silencing the logger instead of
+    # the console handler would silence the audit file too).
+    log.setLevel(min(level, c_level))
+    log.handlers.clear()
+    log.propagate = False
+
+    # Inject the run_id into every record via a filter.
+    if run_id:
+        class _RunIdFilter(logging.Filter):
+            def filter(self, record):
+                record.run_id = run_id
+                return True
+        log.addFilter(_RunIdFilter())
+
+    # Console handler (stderr) — silenced independently by --quiet.
+    console = logging.StreamHandler(sys.stderr)
+    console.setLevel(c_level)
+    if as_json:
+        console.setFormatter(JsonLogFormatter())
+    else:
+        console.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-7s [triage] %(message)s",
+            datefmt="%H:%M:%S"))
+    log.addHandler(console)
+
+    # File handler — always JSON Lines for a durable, parseable audit trail.
+    if log_file:
+        log_dir = os.path.dirname(os.path.abspath(log_file))
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setLevel(level)
+        fh.setFormatter(JsonLogFormatter())
+        log.addHandler(fh)
+
+    return log
 
 # Map: skill folder name -> script filename inside its scripts/ directory.
 SKILL_SCRIPTS = {
@@ -144,6 +280,7 @@ SKILL_SCRIPTS = {
     "ioc-extractor": "ioc_extractor.py",
     "ioc-orchestrator": "ioc_orchestrator.py",
     "whois-lookup": "whois_lookup.py",
+    "email-yara-scanner": "scan_email.py",
 }
 
 
@@ -212,6 +349,13 @@ def run_script(path, args, timeout, stdin_text=None):
     proc = subprocess.run(
         [sys.executable, path] + args,
         input=stdin_text, capture_output=True, text=True, timeout=timeout)
+    # At DEBUG level, record exactly which sub-skill ran, with what args and
+    # what return code — invaluable when reproducing a failed stage.
+    log.debug("sub-skill executed",
+              extra={"event": "subprocess",
+                     "script": os.path.basename(path),
+                     "args": args, "returncode": proc.returncode,
+                     "stderr": (proc.stderr or "").strip()[:200] or None})
     data = None
     out = proc.stdout.strip()
     if out:
@@ -320,6 +464,51 @@ def stage_iocs(script, tmpdir, timeout):
     if data is None:
         raise RuntimeError(f"ioc extractor failed (rc={rc}): "
                            f"{err.strip()[:400]}")
+    return data
+
+
+def stage_yara(script, email_file, rules_path, tmpdir, timeout):
+    """OPTIONAL STAGE — scan the original email with user-supplied YARA rules.
+
+    This stage only runs when the caller passes --yara-rules. YARA needs a
+    rules file authored by the user, so it cannot be a default stage. The
+    email-yara-scanner runs the rules against every layer of the message
+    (raw bytes, decoded text/HTML bodies, headers, and each attachment).
+
+    Input : script      — path to the email-yara-scanner scan_email.py
+            email_file  — the ORIGINAL .eml/.msg on disk (not the parsed JSON;
+                          YARA scans raw bytes and each decoded layer itself)
+            rules_path  — a .yar/.yara file OR a directory of them
+            tmpdir      — scratch dir (unused here but kept for symmetry)
+            timeout     — per-target YARA timeout passed through to the scanner
+    Output: the scanner's JSON report:
+              {"match_found": bool, "total_matches": N, "matches": [
+                 {"rule": ..., "tags": [...], "meta": {...},
+                  "matched_in": "body_html"|"attachment:<name>"|..., "strings":[...]}
+               ], "targets_scanned": [...], "errors": [...]}
+
+    IMPORTANT: the scanner's exit code encodes the result — 0 = matches
+    found, 1 = clean (no matches), 2 = error. A rc of 1 is therefore NOT a
+    failure; as long as valid JSON came back we accept the result. Only a
+    missing/None JSON payload (rc=2, e.g. yara-python not installed or rules
+    failed to compile) is treated as a stage error by the caller.
+    """
+    # --timeout on the scanner is a per-target YARA timeout (seconds); reuse
+    # the pipeline's per-stage timeout but cap it so one giant attachment
+    # can't consume the entire stage budget on a single target.
+    per_target = max(30, min(timeout, 120))
+    data, out, err, rc = run_script(
+        script, ["--file", email_file, "--rules", rules_path,
+                 "--timeout", str(per_target)], timeout)
+    if data is None:
+        raise RuntimeError(f"yara scanner failed (rc={rc}): "
+                           f"{err.strip()[:400]}")
+    # The scanner emits a bare {"error": "..."} JSON (and rc=2) for fatal
+    # conditions such as yara-python not being installed or rules failing to
+    # compile. That parses as JSON but is not a real scan result, so surface
+    # it as a stage error rather than a successful (empty) scan.
+    if isinstance(data, dict) and "error" in data and "matches" not in data:
+        raise RuntimeError(f"yara scanner: {str(data['error'])[:300]}")
     return data
 
 
@@ -454,18 +643,26 @@ def stage_whois(script, iocs_report, max_domains, timeout):
 # STAGE 7 — verdict engine
 # ---------------------------------------------------------------------------
 def compute_verdict(header_rep, body_rep, iocs_rep, intel_rep, whois_rep,
-                    stages):
+                    stages, yara_rep=None):
     """Aggregate every collected signal into one weighted 0-100 risk score.
 
     Scoring model (points are ADDED, total capped at 100):
       +60  ioc-orchestrator overall verdict = malicious
       +25  ioc-orchestrator overall verdict = suspicious
+      +50  YARA match whose meta.severity is "critical"/"high" (strongest
+           single heuristic — the user deliberately wrote that rule)
+      +25  YARA match whose meta.severity is "medium"
+      +12  YARA match with low/unspecified severity
       +0.30 * header risk_score        (max 30)  — spoofing / auth failures
       +0.20 * body anomaly score       (max 20)  — spam / brand impersonation
       +15  any queried domain younger than 30 days
       +8   any queried domain younger than 180 days (if none < 30)
       +10  at least one attachment with a risky extension (.exe/.docm/...)
       +5   URLs present only in HTML href (link text mismatch potential)
+
+    The YARA contribution is taken from the single highest-severity match so
+    multiple matches don't stack past the intended weight; the signal detail
+    still lists every rule that fired.
 
     Verdict thresholds:  score >= 70 -> malicious
                          score >= 40 -> suspicious
@@ -538,6 +735,24 @@ def compute_verdict(header_rep, body_rep, iocs_rep, intel_rep, whois_rep,
     elif young180:
         add(8, "young_domain",
             "domain(s) registered <180 days ago: " + ", ".join(young180[:5]))
+
+    # --- YARA matches (user-authored detection rules) -------------------
+    # A YARA hit is high-signal because the user wrote the rule on purpose.
+    # Score from the single most severe match; list all rules in the detail.
+    if yara_rep and yara_rep.get("matches"):
+        sev_points = {"critical": 50, "high": 50, "medium": 25}
+        best = 0
+        for m in yara_rep["matches"]:
+            sev = str((m.get("meta") or {}).get("severity", "")).lower()
+            best = max(best, sev_points.get(sev, 12))
+        labels = []
+        for m in yara_rep["matches"][:6]:
+            sev = (m.get("meta") or {}).get("severity")
+            labels.append(f"{m.get('rule')} [{m.get('matched_in')}"
+                          + (f", {sev}" if sev else "") + "]")
+        add(best, "yara_match",
+            f"{yara_rep.get('total_matches')} YARA rule(s) matched: "
+            + ", ".join(labels))
 
     # --- Attachments ----------------------------------------------------
     risky = [a["filename"] for a in (iocs_rep or {}).get("attachments", [])
@@ -630,6 +845,14 @@ def ai_assess(report, model, timeout=120):
                            or (w.get("registrant") or {}).get("country")}
             for q, w in (report.get("whois") or {}).items()
             if isinstance(w, dict) and "error" not in w},
+        "yara": {
+            "total_matches": (report.get("yara") or {}).get("total_matches"),
+            "matches": [
+                {"rule": m.get("rule"), "matched_in": m.get("matched_in"),
+                 "severity": (m.get("meta") or {}).get("severity"),
+                 "tags": m.get("tags")}
+                for m in (report.get("yara") or {}).get("matches", [])[:10]],
+        } if report.get("yara") else None,
         "heuristic_verdict": report.get("verdict"),
         "stage_errors": {k: v.get("error") for k, v in
                          report.get("stages", {}).items() if v.get("error")},
@@ -716,6 +939,11 @@ def main(argv=None) -> int:
     ap.add_argument("--skip-intel", action="store_true")
     ap.add_argument("--skip-whois", action="store_true")
     ap.add_argument("--skip-body", action="store_true")
+    ap.add_argument("--yara-rules",
+                    help="path to a YARA rules file (.yar/.yara) or a "
+                         "directory of them; enables the optional YARA scan "
+                         "stage. Requires the email-yara-scanner skill and "
+                         "yara-python. Omit to skip YARA entirely.")
     ap.add_argument("--sources", help="ioc-orchestrator source list "
                                       "(vt,abuseipdb,urlscan,otx,ha)")
     ap.add_argument("--upload", action="store_true",
@@ -729,23 +957,94 @@ def main(argv=None) -> int:
     ap.add_argument("--output", "-o")
     ap.add_argument("--pretty", action="store_true")
     ap.add_argument("--format", choices=["json", "text"], default="json")
+    # --- Logging controls -------------------------------------------------
+    ap.add_argument("--log-file",
+                    help="write a structured JSON-Lines audit log to this "
+                         "path (one record per line; parent dirs are "
+                         "created). The on-disk log is always JSON regardless "
+                         "of --log-json.")
+    ap.add_argument("--log-level", default="INFO",
+                    choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                    help="console/file log verbosity (default: INFO). DEBUG "
+                         "logs each sub-skill's exact command line.")
+    ap.add_argument("--log-json", action="store_true",
+                    help="emit JSON-Lines logs to the console too (for "
+                         "piping into a SIEM). Default console format is "
+                         "human-readable text.")
+    ap.add_argument("--quiet", action="store_true",
+                    help="suppress console logs (WARNING and above still "
+                         "show). A --log-file still records everything.")
     args = ap.parse_args(argv)
 
+    # ---- Logging setup --------------------------------------------------
+    # A short run correlation id lets a single run be grepped out of a shared
+    # log file. --quiet only silences the CONSOLE handler to WARNING; a
+    # --log-file always captures everything at the chosen --log-level.
+    run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S")
+    setup_logging(level_name=args.log_level, log_file=args.log_file,
+                  as_json=args.log_json, run_id=run_id,
+                  console_level="WARNING" if args.quiet else None)
+
     if not os.path.isfile(args.email_file):
+        log.error("input file not found", extra={"event": "fatal",
+                  "input_file": args.email_file})
         print(f"error: file not found: {args.email_file}", file=sys.stderr)
         return 3
 
-    stages = {k: {"status": "skipped", "error": None}
-              for k in ("parse", "headers", "body_anomaly", "ioc_extract",
-                        "intel", "whois", "ai")}
+    log.info("pipeline starting", extra={
+        "event": "pipeline_start", "run_id": run_id,
+        "input_file": os.path.abspath(args.email_file),
+        "pipeline_version": PIPELINE_VERSION,
+        "options": {"skip_intel": args.skip_intel,
+                    "skip_whois": args.skip_whois,
+                    "skip_body": args.skip_body,
+                    "yara_rules": bool(args.yara_rules),
+                    "ai": args.ai, "upload": args.upload}})
+
+    stages = {k: {"status": "skipped", "error": None, "duration_s": None}
+              for k in ("parse", "headers", "body_anomaly", "yara",
+                        "ioc_extract", "intel", "whois", "ai")}
     report = {"pipeline_version": PIPELINE_VERSION,
+              "run_id": run_id,
               "input_file": os.path.abspath(args.email_file),
               "started_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
               "stages": stages}
 
+    # Timestamp bookkeeping for per-stage duration measurement.
+    _stage_clock = {}
+
+    def stage_begin(name, msg):
+        """Log a stage start and record its start time.
+
+        Emits an INFO 'stage_start' record and prints the classic
+        [triage] progress line to stderr via the logger.
+        """
+        _stage_clock[name] = time.monotonic()
+        log.info(msg, extra={"event": "stage_start", "stage": name})
+
+    def stage_end(name):
+        """Record a stage's outcome + duration into stages{} and log it.
+
+        Reads the already-set stages[name]['status'] ('ok'/'error'/'skipped'),
+        computes the elapsed time since stage_begin(), stores it under
+        'duration_s', and logs a 'stage_end' record. Errors are logged at
+        ERROR level with the captured message so failures stand out.
+        """
+        started = _stage_clock.get(name)
+        dur = round(time.monotonic() - started, 3) if started else None
+        stages[name]["duration_s"] = dur
+        st = stages[name]["status"]
+        lvl = logging.ERROR if st == "error" else logging.INFO
+        log.log(lvl, f"{name} {st}" + (f" in {dur}s" if dur is not None
+                                       else ""),
+                extra={"event": "stage_end", "stage": name, "status": st,
+                       "duration_s": dur,
+                       "error": stages[name]["error"]})
+
     def progress(msg):
-        # Progress goes to stderr so stdout stays pure JSON for piping.
-        print(f"[triage] {msg}", file=sys.stderr)
+        # Backwards-compatible helper: routes the old [triage] progress
+        # messages through the logger at INFO level.
+        log.info(msg, extra={"event": "progress"})
 
     with tempfile.TemporaryDirectory(prefix="email_triage_") as tmpdir:
         # ---- STAGE 1: parse (fatal if it fails) ------------------------
@@ -754,17 +1053,22 @@ def main(argv=None) -> int:
             print("error: email-parser skill not found "
                   "(set --skills-root)", file=sys.stderr)
             return 3
-        progress("1/7 parsing email ...")
+        stage_begin("parse", "parsing email")
         try:
             parsed, att_paths = stage_parse(script, args.email_file,
                                             tmpdir, args.timeout)
             stages["parse"]["status"] = "ok"
         except Exception as e:
-            stages["parse"] = {"status": "error", "error": str(e)}
+            stages["parse"] = {"status": "error", "error": str(e),
+                               "duration_s": None}
+            stage_end("parse")
+            log.critical("parse failed — cannot continue",
+                         extra={"event": "pipeline_abort", "stage": "parse"})
             report["finished_utc"] = dt.datetime.now(
                 dt.timezone.utc).isoformat()
             print(json.dumps(report, indent=2))
             return 3
+        stage_end("parse")
         report["email"] = {
             "subject": parsed.get("subject"),
             "from": parsed.get("from"), "to": parsed.get("to"),
@@ -776,21 +1080,23 @@ def main(argv=None) -> int:
         # ---- STAGE 2: header analysis ---------------------------------
         header_rep = None
         script = find_script("email-header-analyzer", args.skills_root)
-        progress("2/7 analyzing headers ...")
+        stage_begin("headers", "analyzing headers")
         try:
             if not script:
                 raise RuntimeError("email-header-analyzer skill not found")
             header_rep = stage_headers(script, parsed, tmpdir, args.timeout)
             stages["headers"]["status"] = "ok"
         except Exception as e:
-            stages["headers"] = {"status": "error", "error": str(e)}
+            stages["headers"] = {"status": "error", "error": str(e),
+                                 "duration_s": None}
+        stage_end("headers")
         report["header_analysis"] = header_rep
 
         # ---- STAGE 3: body anomaly ------------------------------------
         body_rep = None
         if not args.skip_body:
             script = find_script("email-anomaly-detector", args.skills_root)
-            progress("3/7 analyzing body ...")
+            stage_begin("body_anomaly", "analyzing body")
             try:
                 if not script:
                     raise RuntimeError("email-anomaly-detector skill "
@@ -798,44 +1104,88 @@ def main(argv=None) -> int:
                 body_rep = stage_body(script, parsed, tmpdir, args.timeout)
                 stages["body_anomaly"]["status"] = "ok"
             except Exception as e:
-                stages["body_anomaly"] = {"status": "error", "error": str(e)}
+                stages["body_anomaly"] = {"status": "error", "error": str(e),
+                                          "duration_s": None}
+            stage_end("body_anomaly")
+        else:
+            log.info("body_anomaly skipped (--skip-body)",
+                     extra={"event": "stage_skip", "stage": "body_anomaly",
+                            "reason": "flag"})
         report["body_analysis"] = body_rep
+
+        # ---- OPTIONAL STAGE: YARA scan --------------------------------
+        # Runs only when --yara-rules is supplied. Scans the ORIGINAL email
+        # file (raw bytes + every decoded layer) with the user's rules.
+        yara_rep = None
+        if args.yara_rules:
+            script = find_script("email-yara-scanner", args.skills_root)
+            stage_begin("yara", "scanning with YARA rules")
+            try:
+                if not script:
+                    raise RuntimeError("email-yara-scanner skill not found")
+                if not os.path.exists(args.yara_rules):
+                    raise RuntimeError(f"YARA rules path not found: "
+                                       f"{args.yara_rules}")
+                yara_rep = stage_yara(script, args.email_file,
+                                      args.yara_rules, tmpdir, args.timeout)
+                stages["yara"]["status"] = "ok"
+            except Exception as e:
+                stages["yara"] = {"status": "error", "error": str(e),
+                                  "duration_s": None}
+            stage_end("yara")
+        else:
+            log.info("yara skipped (no --yara-rules)",
+                     extra={"event": "stage_skip", "stage": "yara",
+                            "reason": "no_rules"})
+        report["yara"] = yara_rep
 
         # ---- STAGE 4: IOC extraction ----------------------------------
         iocs_rep = None
         script = find_script("ioc-extractor", args.skills_root)
-        progress("4/7 extracting IOCs ...")
+        stage_begin("ioc_extract", "extracting IOCs")
         try:
             if not script:
                 raise RuntimeError("ioc-extractor script not found")
             iocs_rep = stage_iocs(script, tmpdir, args.timeout)
             stages["ioc_extract"]["status"] = "ok"
         except Exception as e:
-            stages["ioc_extract"] = {"status": "error", "error": str(e)}
+            stages["ioc_extract"] = {"status": "error", "error": str(e),
+                                     "duration_s": None}
+        stage_end("ioc_extract")
         report["iocs"] = iocs_rep
 
         # ---- STAGE 5: threat intel ------------------------------------
         intel_rep = None
         if not args.skip_intel and iocs_rep:
             script = find_script("ioc-orchestrator", args.skills_root)
-            progress("5/7 querying threat intel sources ...")
+            stage_begin("intel", "querying threat intel sources")
             try:
                 if not script:
                     raise RuntimeError("ioc-orchestrator skill not found")
                 sel = select_iocs_for_intel(iocs_rep, att_paths,
                                             args.max_urls, args.max_domains)
+                log.debug("intel IOC selection",
+                          extra={"event": "intel_select",
+                                 "ioc_count": len(sel)})
                 intel_rep = stage_intel(script, sel, args.sources,
                                         args.upload, args.timeout)
                 stages["intel"]["status"] = "ok"
             except Exception as e:
-                stages["intel"] = {"status": "error", "error": str(e)}
+                stages["intel"] = {"status": "error", "error": str(e),
+                                   "duration_s": None}
+            stage_end("intel")
+        else:
+            reason = "flag" if args.skip_intel else "no_iocs"
+            log.info(f"intel skipped ({reason})",
+                     extra={"event": "stage_skip", "stage": "intel",
+                            "reason": reason})
         report["intel"] = intel_rep
 
         # ---- STAGE 6: WHOIS -------------------------------------------
         whois_rep = None
         if not args.skip_whois and iocs_rep:
             script = find_script("whois-lookup", args.skills_root)
-            progress("6/7 running WHOIS lookups ...")
+            stage_begin("whois", "running WHOIS lookups")
             try:
                 if not script:
                     raise RuntimeError("whois-lookup skill not found")
@@ -843,26 +1193,72 @@ def main(argv=None) -> int:
                                         args.max_domains, args.timeout)
                 stages["whois"]["status"] = "ok"
             except Exception as e:
-                stages["whois"] = {"status": "error", "error": str(e)}
+                stages["whois"] = {"status": "error", "error": str(e),
+                                   "duration_s": None}
+            stage_end("whois")
+        else:
+            reason = "flag" if args.skip_whois else "no_iocs"
+            log.info(f"whois skipped ({reason})",
+                     extra={"event": "stage_skip", "stage": "whois",
+                            "reason": reason})
         report["whois"] = whois_rep
 
         # ---- STAGE 7: heuristic verdict -------------------------------
-        progress("7/7 computing verdict ...")
+        progress("computing verdict ...")
         report["verdict"] = compute_verdict(header_rep, body_rep, iocs_rep,
-                                            intel_rep, whois_rep, stages)
+                                            intel_rep, whois_rep, stages,
+                                            yara_rep=yara_rep)
+        log.info("verdict computed",
+                 extra={"event": "verdict",
+                        "verdict": report["verdict"]["verdict"],
+                        "score": report["verdict"]["score"],
+                        "confidence": report["verdict"]["confidence"],
+                        "signal_count": len(report["verdict"]["signals"])})
 
         # ---- STAGE 8 (optional): AI assessment ------------------------
         if args.ai:
-            progress("8/8 requesting AI analyst assessment ...")
+            stage_begin("ai", "requesting AI analyst assessment")
             try:
                 report["ai_analysis"] = ai_assess(report, args.ai_model)
                 stages["ai"]["status"] = "ok"
             except Exception as e:
-                stages["ai"] = {"status": "error", "error": str(e)}
+                stages["ai"] = {"status": "error", "error": str(e),
+                                "duration_s": None}
+            stage_end("ai")
+        else:
+            log.info("ai skipped (no --ai)",
+                     extra={"event": "stage_skip", "stage": "ai",
+                            "reason": "flag"})
 
     report["finished_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
 
-    # ---- Emit ----------------------------------------------------------
+    # ---- Run summary log ----------------------------------------------
+    # One consolidated record capturing the outcome of every stage and the
+    # total wall-clock time — the single line an operator greps to answer
+    # "what ran, what was skipped, where did it fail, and how long did it
+    # take?" for this run.
+    ok = [k for k, v in stages.items() if v["status"] == "ok"]
+    skipped = [k for k, v in stages.items() if v["status"] == "skipped"]
+    errored = {k: v["error"] for k, v in stages.items()
+               if v["status"] == "error"}
+    total_s = round((dt.datetime.fromisoformat(report["finished_utc"])
+                     - dt.datetime.fromisoformat(report["started_utc"]))
+                    .total_seconds(), 3)
+    log.info("pipeline finished",
+             extra={"event": "pipeline_end", "run_id": run_id,
+                    "verdict": report["verdict"]["verdict"],
+                    "score": report["verdict"]["score"],
+                    "total_s": total_s,
+                    "stages_ok": ok, "stages_skipped": skipped,
+                    "stages_error": list(errored.keys()),
+                    "durations": {k: v["duration_s"]
+                                  for k, v in stages.items()
+                                  if v["duration_s"] is not None}})
+    if errored:
+        for stage_name, msg in errored.items():
+            log.warning("stage completed with error (evidence incomplete)",
+                        extra={"event": "stage_error_summary",
+                               "stage": stage_name, "error": msg})
     if args.format == "text":
         out = render_text(report)
     else:

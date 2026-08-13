@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phishHunter — Report</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="nav">
+    <div class="brand"><span class="fish">phish</span>Hunter</div>
+    <a class="item" href="/"><span class="dot"></span>Dashboard</a>
+    <a class="item" href="/analyze"><span class="dot"></span>New analysis</a>
+    <a class="item" href="/history"><span class="dot"></span>History</a>
+    <div class="spacer"></div>
+    <div class="foot">local console · v1.0</div>
+  </nav>
+
+  <main class="main">
+    <h1 class="page-title" id="title">Report</h1>
+    <p class="page-sub mono" id="sub"></p>
+
+    <div id="banner"></div>
+    <div id="content"></div>
+    <div class="empty" id="loading">Loading report…</div>
+  </main>
+</div>
+
+<script>
+/* Report renderer.
+   Fetches /api/analysis/{id}/report (the pipeline's full JSON) and renders
+   the same evidence sections as the PDF report: verdict banner, email
+   summary, risk signals, header findings, body score, YARA matches, IOCs,
+   threat intel, WHOIS, AI assessment, and the stage audit trail. Every
+   section tolerates its data being null (stage skipped/errored). */
+
+const id = location.pathname.split("/").pop();
+const esc = s => String(s ?? "—").replace(/[&<>"]/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const el = html => { const d = document.createElement("div");
+                     d.innerHTML = html; return d; };
+const card = inner => `<div class="card" style="margin-bottom:16px">${inner}</div>`;
+const sec = t => `<div class="section-title">${t}</div>`;
+
+function kv(pairs) {
+  return `<div class="kv">` + pairs.map(([k, v]) =>
+    `<div class="k">${esc(k)}</div><div class="v">${v}</div>`).join("") +
+    `</div>`;
+}
+
+async function render() {
+  const r = await fetch(`/api/analysis/${id}/report`);
+  document.getElementById("loading").style.display = "none";
+  if (!r.ok) {
+    document.getElementById("content").innerHTML =
+      `<div class="empty">Report not found — the analysis may still be
+       running. <a href="/analyze?id=${id}">Watch its progress</a>.</div>`;
+    return;
+  }
+  const rep = await r.json();
+  const v = rep.verdict || {};
+  const em = rep.email || {};
+
+  document.getElementById("sub").textContent =
+    `${rep.input_file?.split(/[\\/]/).pop() || ""} · run ${rep.run_id || id.slice(0,8)} · ${rep.started_utc || ""}`;
+
+  /* Verdict banner */
+  document.getElementById("banner").innerHTML =
+    `<div class="verdict-banner ${v.verdict}">
+       <div class="v">VERDICT: ${esc(v.verdict).toUpperCase()}</div>
+       <div class="s">score ${esc(v.score)}/100 · confidence ${esc(v.confidence)}</div>
+     </div>`;
+
+  const parts = [];
+
+  /* 1 — Email summary */
+  parts.push(card(sec("Email summary") + kv([
+    ["Subject", esc(em.subject)],
+    ["From", esc(`${em.from?.name || ""} <${em.from?.email || ""}>`)],
+    ["To", esc((em.to || []).map(t => t.email).join(", "))],
+    ["Date", esc(em.date)],
+    ["Attachments", esc((em.attachment_names || []).join(", ") || "none")],
+  ])));
+
+  /* 2 — Risk signals */
+  const sigs = (v.signals || []).map(s =>
+    `<div class="signal"><div class="pts">+${esc(s.points)}</div>
+     <div class="code">${esc(s.signal)}</div>
+     <div class="why">${esc(s.detail)}</div></div>`).join("");
+  parts.push(card(sec("Risk signals (verdict engine)") +
+    (sigs || `<div class="empty">No risk signals fired.</div>`)));
+
+  /* 3 — Header analysis */
+  const h = rep.header_analysis;
+  if (h) {
+    const a = h.authentication || {};
+    const findings = (h.findings || []).map(f =>
+      `<div class="signal"><div class="sev ${esc(f.severity)}">${esc(f.severity).toUpperCase()}</div>
+       <div class="code">${esc(f.code)}</div>
+       <div class="why">${esc(f.message)}</div></div>`).join("");
+    parts.push(card(sec("Header analysis") +
+      `<p style="margin:0 0 10px; color:var(--muted)">${esc(h.summary?.verdict)}</p>` +
+      kv([["Header risk", `<span class="score">${esc(h.summary?.risk_score)}/100</span> (${esc(h.summary?.risk_level)})`],
+          ["SPF / DKIM / DMARC",
+           `<span class="mono">${esc(a.spf)} / ${esc(a.dkim)} / ${esc(a.dmarc)}</span>`]]) +
+      (findings ? `<div style="margin-top:12px">${findings}</div>` : "")));
+  }
+
+  /* 4 — Body analysis */
+  const b = rep.body_analysis;
+  if (b) {
+    const score = b.anomaly_score ?? b.anomaly?.score ?? b.score;
+    parts.push(card(sec("Body analysis") + kv([
+      ["Anomaly score", `<span class="score">${esc(score)}/100</span>`],
+      ["Verdict", esc(b.verdict || b.final_verdict)]])));
+  }
+
+  /* 4b — YARA matches */
+  if (rep.yara) {
+    const rows = (rep.yara.matches || []).map(m =>
+      `<tr><td class="mono">${esc(m.rule)}</td>
+       <td class="mono">${esc(m.matched_in)}</td>
+       <td>${esc(m.meta?.severity)}</td>
+       <td>${esc((m.tags || []).join(", "))}</td></tr>`).join("");
+    parts.push(card(sec("YARA matches") + (rows ?
+      `<table class="list"><thead><tr><th>Rule</th><th>Matched in</th>
+       <th>Severity</th><th>Tags</th></tr></thead><tbody>${rows}</tbody></table>`
+      : `<div class="empty">Rules ran; no rule matched.</div>`)));
+  }
+
+  /* 5 — IOCs */
+  const iocs = rep.iocs?.iocs;
+  if (iocs) {
+    const pills = arr => arr?.length
+      ? `<div class="pill-list">` + arr.map(e =>
+          `<div class="pill">${esc(e.value)}</div>`).join("") + `</div>`
+      : `<div class="empty">none</div>`;
+    parts.push(card(sec("Extracted IOCs") +
+      `<div class="kv" style="grid-template-columns:110px 1fr; row-gap:12px">
+        <div class="k">URLs</div><div class="v">${pills(iocs.urls)}</div>
+        <div class="k">Domains</div><div class="v">${pills(iocs.domains)}</div>
+        <div class="k">IPs</div><div class="v">${pills(iocs.ips)}</div>
+        <div class="k">Hashes</div><div class="v">${pills(iocs.hashes)}</div>
+        <div class="k">Emails</div><div class="v">${pills(iocs.emails)}</div>
+      </div>`));
+  }
+
+  /* 6 — Threat intel */
+  const intel = rep.intel;
+  if (intel) {
+    const rows = (intel.results || []).map(x => {
+      const bd = Object.entries(x.verdict_breakdown || {})
+        .map(([k, vv]) => `${k}=${vv}`).join(" · ");
+      return `<tr><td class="mono">${esc(x.ioc)}</td>
+        <td>${esc(x.detected_type)}</td>
+        <td><span class="badge ${esc(x.overall_verdict)}">${esc(x.overall_verdict)}</span></td>
+        <td class="mono" style="color:var(--muted)">${esc(bd)}</td></tr>`;
+    }).join("");
+    parts.push(card(sec("Threat intelligence") +
+      `<p style="margin:0 0 10px">Overall:
+        <span class="badge ${esc(intel.overall_verdict)}">${esc(intel.overall_verdict)}</span></p>` +
+      (rows ? `<table class="list"><thead><tr><th>IOC</th><th>Type</th>
+        <th>Verdict</th><th>Per-source</th></tr></thead><tbody>${rows}</tbody></table>`
+        : `<div class="empty">No IOCs were sent to intel sources.</div>`)));
+  }
+
+  /* 7 — WHOIS */
+  const who = rep.whois;
+  if (who) {
+    const rows = Object.entries(who).map(([q, w]) => {
+      if (w.error) return `<tr><td class="mono">${esc(q)}</td>
+        <td colspan="3" style="color:var(--faint)">${esc(w.error)}</td></tr>`;
+      return `<tr><td class="mono">${esc(q)}</td>
+        <td>${esc(w.registrar || w.organization)}</td>
+        <td class="mono">${esc(w.creation_date)}</td>
+        <td class="score">${w.age_days != null ? esc(w.age_days) + " d" : "—"}</td></tr>`;
+    }).join("");
+    parts.push(card(sec("WHOIS") +
+      `<table class="list"><thead><tr><th>Query</th><th>Registrar / Org</th>
+       <th>Created</th><th>Age</th></tr></thead><tbody>${rows}</tbody></table>`));
+  }
+
+  /* 8 — AI analyst */
+  const ai = rep.ai_analysis;
+  if (ai) {
+    parts.push(card(sec("AI analyst assessment") + kv([
+      ["Model", esc(ai.model)],
+      ["Verdict", `<span class="badge ${esc(ai.verdict)}">${esc(ai.verdict)}</span> (${esc(ai.confidence)})`],
+      ["Reasoning", esc(ai.reasoning)],
+      ["Actions", esc((ai.recommended_actions || []).join(" · "))]])));
+  }
+
+  /* 9 — Pipeline stages (audit trail) */
+  const stg = rep.stages || {};
+  const srows = Object.entries(stg).map(([k, s]) =>
+    `<tr><td class="mono">${esc(k)}</td>
+     <td><span class="badge ${s.status === "ok" ? "clean" :
+          s.status === "error" ? "malicious" : "error"}">${esc(s.status)}</span></td>
+     <td class="mono">${s.duration_s != null ? esc(s.duration_s) + "s" : "—"}</td>
+     <td style="color:var(--muted)">${esc(s.error || "")}</td></tr>`).join("");
+  parts.push(card(sec("Pipeline stages") +
+    `<table class="list"><thead><tr><th>Stage</th><th>Status</th>
+     <th>Duration</th><th>Note</th></tr></thead><tbody>${srows}</tbody></table>`));
+
+  document.getElementById("content").innerHTML = parts.join("");
+}
+render();
+</script>
+</body>
+</html>

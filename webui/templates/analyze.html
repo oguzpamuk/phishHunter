@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phishHunter — New analysis</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="nav">
+    <div class="brand"><span class="fish">phish</span>Hunter</div>
+    <a class="item" href="/"><span class="dot"></span>Dashboard</a>
+    <a class="item active" href="/analyze"><span class="dot"></span>New analysis</a>
+    <a class="item" href="/history"><span class="dot"></span>History</a>
+    <div class="spacer"></div>
+    <div class="foot">local console · v1.0</div>
+  </nav>
+
+  <main class="main">
+    <h1 class="page-title">New analysis</h1>
+    <p class="page-sub">Upload a suspicious email — the pipeline runs every stage and reports live below.</p>
+
+    <div class="grid cols-2" style="grid-template-columns: 1.2fr 1fr;">
+      <!-- Left: upload form -->
+      <div class="card" id="form-card">
+        <div class="dropzone" id="dz" tabindex="0" role="button"
+             aria-label="Choose an email file">
+          <div class="big">Drop an .eml or .msg here</div>
+          <div>or click to choose a file</div>
+          <div class="picked" id="picked"></div>
+          <input type="file" id="file" accept=".eml,.msg" hidden>
+        </div>
+
+        <div style="margin-top:18px; display:flex; flex-direction:column; gap:10px;">
+          <label class="check"><input type="checkbox" id="opt-intel" checked>
+            Threat intel lookups (VirusTotal, AbuseIPDB, OTX, HA, urlscan — needs API keys)</label>
+          <label class="check"><input type="checkbox" id="opt-whois" checked>
+            WHOIS enrichment (domain age, registrar)</label>
+          <label class="check"><input type="checkbox" id="opt-ai">
+            AI analyst assessment (needs ANTHROPIC_API_KEY)</label>
+          <label class="check" style="align-items:flex-start">
+            <input type="checkbox" id="opt-yara">
+            <span>YARA scan with my rules
+              <input type="file" id="yara-file" accept=".yar,.yara"
+                     style="display:block; margin-top:6px; color:var(--muted)" disabled>
+            </span>
+          </label>
+        </div>
+
+        <div style="margin-top:20px; display:flex; gap:12px; align-items:center;">
+          <button class="btn" id="go" disabled>Start analysis</button>
+          <span id="form-msg" style="color:var(--muted); font-size:13.5px;"></span>
+        </div>
+      </div>
+
+      <!-- Right: live stage rail -->
+      <div class="card">
+        <h2 style="margin:0 0 4px; font-size:16px;">Pipeline progress</h2>
+        <p style="color:var(--faint); font-size:13px; margin:0 0 16px;"
+           id="rail-sub">Waiting for an upload…</p>
+        <ul class="rail" id="rail"></ul>
+        <div id="done-box" style="display:none; margin-top:8px;">
+          <a class="btn" id="open-report" href="#">Open full report</a>
+        </div>
+        <div id="err-box" class="empty" style="display:none;"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+/* Analyze controller.
+   Flow: pick file → POST /api/analyze (multipart) → poll
+   /api/analysis/{id}/progress every second → paint the stage rail from the
+   pipeline's audit-log events → on pipeline completion show the report CTA.
+   If the page is opened as /analyze?id=<id> (e.g. from the dashboard's
+   "running" row) it resumes polling that analysis directly. */
+
+const STAGES = null; // rail rows come fully from the API (single source of truth)
+const $ = id => document.getElementById(id);
+let emailFile = null;
+
+/* ---- dropzone wiring -------------------------------------------------- */
+const dz = $("dz"), fileInput = $("file");
+dz.onclick = () => fileInput.click();
+dz.onkeydown = e => { if (e.key === "Enter" || e.key === " ") fileInput.click(); };
+["dragover","dragenter"].forEach(ev => dz.addEventListener(ev, e => {
+  e.preventDefault(); dz.classList.add("hover"); }));
+["dragleave","drop"].forEach(ev => dz.addEventListener(ev, e => {
+  e.preventDefault(); dz.classList.remove("hover"); }));
+dz.addEventListener("drop", e => pick(e.dataTransfer.files[0]));
+fileInput.onchange = () => pick(fileInput.files[0]);
+
+function pick(f) {
+  if (!f) return;
+  if (!/\.(eml|msg)$/i.test(f.name)) {
+    $("form-msg").textContent = "Only .eml or .msg files are supported.";
+    return;
+  }
+  emailFile = f;
+  $("picked").textContent = `${f.name}  ·  ${(f.size/1024).toFixed(1)} KB`;
+  $("form-msg").textContent = "";
+  $("go").disabled = false;
+}
+
+$("opt-yara").onchange = e => $("yara-file").disabled = !e.target.checked;
+
+/* ---- submit ------------------------------------------------------------ */
+$("go").onclick = async () => {
+  const fd = new FormData();
+  fd.append("email", emailFile);
+  if (!$("opt-intel").checked) fd.append("skip_intel", "1");
+  if (!$("opt-whois").checked) fd.append("skip_whois", "1");
+  if ($("opt-ai").checked)     fd.append("ai", "1");
+  if ($("opt-yara").checked && $("yara-file").files[0])
+      fd.append("yara_rules", $("yara-file").files[0]);
+
+  $("go").disabled = true;
+  $("form-msg").textContent = "Uploading…";
+  const r = await fetch("/api/analyze", {method: "POST", body: fd});
+  const j = await r.json();
+  if (!r.ok) { $("form-msg").textContent = j.error || "Upload failed.";
+               $("go").disabled = false; return; }
+  $("form-msg").textContent = "Analysis started.";
+  history.replaceState(null, "", `/analyze?id=${j.id}`);
+  poll(j.id);
+};
+
+/* ---- progress rail ------------------------------------------------------ */
+function paintRail(stages) {
+  const rail = $("rail");
+  rail.innerHTML = "";
+  for (const s of stages) {
+    const li = document.createElement("li");
+    // "pending" keeps the hollow default node; map others to CSS classes.
+    li.className = s.status === "ok" ? "ok"
+                 : s.status === "error" ? "error"
+                 : s.status === "skipped" ? "skipped"
+                 : s.status === "running" ? "running" : "";
+    let meta = "";
+    if (s.status === "ok" && s.duration_s != null) meta = `${s.duration_s}s`;
+    if (s.status === "skipped") meta = `skipped (${s.error || "–"})`;
+    if (s.status === "error")   meta = s.error || "error";
+    li.innerHTML = `<span class="node"></span>
+                    <div class="name">${s.label}</div>
+                    <div class="meta">${meta}</div>`;
+    rail.appendChild(li);
+  }
+}
+
+let timer = null;
+async function poll(id) {
+  $("rail-sub").textContent = "Live — updates every second.";
+  const tick = async () => {
+    const r = await fetch(`/api/analysis/${id}/progress`);
+    if (!r.ok) return stop("Analysis not found.");
+    const p = await r.json();
+    paintRail(p.stages);
+    if (p.status === "done") {
+      stop();
+      const v = p.verdict || {};
+      $("rail-sub").innerHTML =
+        `Finished — <span class="badge ${v.verdict}">${v.verdict}</span>
+         <span class="mono">score ${v.score}/100 · ${v.confidence}</span>`;
+      $("open-report").href = `/report/${id}`;
+      $("done-box").style.display = "block";
+    } else if (p.status === "error") {
+      stop();
+      $("err-box").style.display = "block";
+      $("err-box").textContent = "Pipeline failed: " + (p.error || "unknown");
+    }
+  };
+  await tick();
+  timer = setInterval(tick, 1000);
+}
+function stop(msg) {
+  if (timer) clearInterval(timer);
+  if (msg) { $("err-box").style.display = "block"; $("err-box").textContent = msg; }
+}
+
+/* Resume a run when opened via /analyze?id=… */
+const resumeId = new URLSearchParams(location.search).get("id");
+if (resumeId) {
+  $("form-card").style.opacity = .5;
+  $("form-card").style.pointerEvents = "none";
+  poll(resumeId);
+}
+</script>
+</body>
+</html>

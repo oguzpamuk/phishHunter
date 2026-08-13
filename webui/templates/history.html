@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phishHunter — History</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="nav">
+    <div class="brand"><span class="fish">phish</span>Hunter</div>
+    <a class="item" href="/"><span class="dot"></span>Dashboard</a>
+    <a class="item" href="/analyze"><span class="dot"></span>New analysis</a>
+    <a class="item active" href="/history"><span class="dot"></span>History</a>
+    <div class="spacer"></div>
+    <div class="foot">local console · v1.0</div>
+  </nav>
+
+  <main class="main">
+    <h1 class="page-title">History</h1>
+    <p class="page-sub">Every past analysis — filter by verdict or search by filename.</p>
+
+    <div class="filterbar">
+      <div class="seg-group" id="verdict-filter" role="tablist" aria-label="Verdict filter">
+        <button class="on" data-v="">All</button>
+        <button data-v="malicious">Malicious</button>
+        <button data-v="suspicious">Suspicious</button>
+        <button data-v="clean">Clean</button>
+        <button data-v="error">Errors</button>
+        <button data-v="running">Running</button>
+      </div>
+      <input type="text" id="q" placeholder="Search filename…"
+             style="flex:1; min-width:180px" aria-label="Search filename">
+      <span id="count" style="color:var(--faint); font-size:13px"></span>
+    </div>
+
+    <div class="card">
+      <table class="list" id="tbl">
+        <thead><tr>
+          <th>File</th><th>Verdict</th><th>Score</th>
+          <th>Confidence</th><th>When</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none">
+        Nothing matches this filter. Clear it or
+        <a href="/analyze">run a new analysis</a>.
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+/* History controller: keeps the verdict segment + search box in sync with
+   /api/analyses (server-side filtering), debounces typing, and links each
+   row to its report (or live progress when still running). */
+let verdict = "", q = "", debounce = null;
+
+const fmtTime = iso => new Date(iso).toLocaleString(undefined,
+    {year:"numeric", month:"short", day:"numeric",
+     hour:"2-digit", minute:"2-digit"});
+const badge = row => {
+  if (row.status === "running") return '<span class="badge running">running</span>';
+  if (row.status === "error")   return '<span class="badge error">error</span>';
+  return `<span class="badge ${row.verdict}">${row.verdict||"?"}</span>`;
+};
+
+async function load() {
+  const params = new URLSearchParams();
+  if (verdict) params.set("verdict", verdict);
+  if (q) params.set("q", q);
+  const r = await fetch("/api/analyses?" + params);
+  const {items} = await r.json();
+
+  document.getElementById("count").textContent =
+      `${items.length} result${items.length === 1 ? "" : "s"}`;
+  const tbody = document.querySelector("#tbl tbody");
+  tbody.innerHTML = "";
+  document.getElementById("empty").style.display =
+      items.length ? "none" : "block";
+
+  for (const row of items) {
+    const tr = document.createElement("tr");
+    tr.className = "row";
+    tr.innerHTML = `<td class="mono">${row.filename}</td>
+      <td>${badge(row)}</td>
+      <td class="score">${row.score ?? "–"}</td>
+      <td style="color:var(--muted)">${row.confidence ?? "–"}</td>
+      <td style="color:var(--muted)">${fmtTime(row.created_utc)}</td>`;
+    tr.onclick = () => location.href =
+        row.status === "running" ? `/analyze?id=${row.id}` : `/report/${row.id}`;
+    tbody.appendChild(tr);
+  }
+}
+
+document.getElementById("verdict-filter").onclick = e => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  document.querySelectorAll("#verdict-filter button")
+      .forEach(b => b.classList.toggle("on", b === btn));
+  verdict = btn.dataset.v;
+  load();
+};
+document.getElementById("q").oninput = e => {
+  clearTimeout(debounce);
+  debounce = setTimeout(() => { q = e.target.value.trim(); load(); }, 250);
+};
+
+load();
+setInterval(load, 8000);   /* keep running rows fresh */
+</script>
+</body>
+</html>
