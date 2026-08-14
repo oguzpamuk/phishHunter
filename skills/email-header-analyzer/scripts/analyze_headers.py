@@ -217,6 +217,113 @@ def base_domain(domain):
     return ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
 
+def parse_dkim_signature(raw):
+    """Parse the DKIM-Signature header(s) into their tag-value parts.
+
+    Input : the raw header value, or a list when the message was signed more
+            than once (forwarders and mailing lists often add a second one).
+    Output: list of dicts, one per signature:
+              {"d": signing domain, "s": selector, "a": algorithm,
+               "raw_tags": {...all tags...}}
+            Empty list when no signature is present.
+
+    Why parse it at all when Authentication-Results already reports pass or
+    fail: the result tells you the signature was VALID, not WHO signed it. A
+    perfectly valid signature from `d=bulk-sender.example` on a message
+    claiming to come from a bank is exactly the case worth seeing.
+    """
+    if not raw:
+        return []
+    values = raw if isinstance(raw, list) else [raw]
+    out = []
+    for val in values:
+        tags = {}
+        # Tag-value pairs separated by ';', values may wrap across lines.
+        for part in str(val).split(";"):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            tags[k.strip().lower()] = re.sub(r"\s+", "", v)
+        if tags:
+            out.append({"d": tags.get("d"), "s": tags.get("s"),
+                        "a": tags.get("a"), "raw_tags": tags})
+    return out
+
+
+def parse_arc(headers):
+    """Summarize the ARC (Authenticated Received Chain) headers.
+
+    ARC records the authentication results a message had BEFORE it was
+    forwarded. It matters here mostly for the opposite of the usual reason:
+    when SPF fails locally because a mailing list or forwarder relayed the
+    message, a valid ARC chain shows the original hop authenticated fine —
+    evidence against spoofing rather than for it.
+
+    Input : normalized headers dict
+    Output: {"present": bool, "instances": N, "cv": chain-validation result
+             from the outermost ARC-Seal ("pass"/"fail"/"none"/None),
+             "upstream_auth": the ARC-Authentication-Results text (clipped)}
+    """
+    seal = headers.get("arc-seal")
+    aar = headers.get("arc-authentication-results")
+    msig = headers.get("arc-message-signature")
+    if not any((seal, aar, msig)):
+        return {"present": False, "instances": 0, "cv": None,
+                "upstream_auth": None}
+    seals = seal if isinstance(seal, list) else ([seal] if seal else [])
+    cv = None
+    if seals:
+        m = re.search(r"\bcv\s*=\s*(\w+)", str(seals[-1]))
+        cv = m.group(1).lower() if m else None
+    aar_text = first(aar)
+    return {
+        "present": True,
+        "instances": max(len(seals), 1),
+        "cv": cv,
+        "upstream_auth": (str(aar_text)[:300] if aar_text else None),
+    }
+
+
+# Mailer fingerprints. Presence alone proves nothing — PHPMailer sends plenty
+# of legitimate mail — so these are scored as low-severity context, not as
+# accusations. They earn their place because a phishing kit run from a
+# compromised web host looks very different from Outlook or a real ESP.
+SUSPICIOUS_MAILERS = {
+    "phpmailer": "PHP script-generated mail — the standard phishing-kit stack",
+    "swiftmailer": "PHP script-generated mail",
+    "phpmail": "raw PHP mail() call",
+    "x-php": "raw PHP mail() call",
+    "send-safe": "bulk mailing tool associated with spam operations",
+    "massmailer": "mass-mailing tool",
+    "mass mailer": "mass-mailing tool",
+    "advanced mass sender": "bulk mailing tool associated with spam",
+    "turbo-mailer": "bulk mailing tool",
+    "atomic mail": "bulk mailing tool associated with spam",
+    "gammadyne": "bulk mailing tool",
+    "smtp-mailer": "generic scripted mailer",
+    "python-requests": "script-generated mail",
+    "sendmail-python": "script-generated mail",
+}
+
+
+def identify_mailer(headers):
+    """Read X-Mailer / User-Agent and match against known tooling.
+
+    Input : normalized headers dict
+    Output: {"x_mailer": str|None, "user_agent": str|None,
+             "flagged": (matched_key, explanation) | None}
+    """
+    xm = first(headers.get("x-mailer"))
+    ua = first(headers.get("user-agent"))
+    blob = " ".join(filter(None, [str(xm or ""), str(ua or "")])).lower()
+    flagged = None
+    for needle, why in SUSPICIOUS_MAILERS.items():
+        if needle in blob:
+            flagged = (needle, why)
+            break
+    return {"x_mailer": xm, "user_agent": ua, "flagged": flagged}
+
+
 def parse_auth_results(auth_raw, spf_raw):
     """Extract spf/dkim/dmarc results from Authentication-Results and
     Received-SPF header values.
@@ -466,12 +573,102 @@ def analyze(headers: dict) -> dict:
                 "SPF/DKIM/DMARC could not be evaluated.")
 
     # ------------------------------------------------------------------
+    # DKIM signature internals
+    #
+    # Authentication-Results tells you whether a signature verified. It does
+    # not tell you WHO signed. A valid signature from an unrelated domain on
+    # a message claiming to be from a bank is a different situation from a
+    # valid signature by the bank itself.
+    # ------------------------------------------------------------------
+    dkim_sigs = parse_dkim_signature(headers.get("dkim-signature"))
+    for sig in dkim_sigs:
+        d = (sig.get("d") or "").lower()
+        if d and from_domain and base_domain(d) != base_domain(from_domain):
+            finding("warning", "DKIM_DOMAIN_MISALIGNED",
+                    f"The message is DKIM-signed by '{d}', which does not "
+                    f"align with the From domain ({from_domain}). Normal for "
+                    "mail sent through a provider on the sender's behalf, but "
+                    "it means the From domain did not vouch for this message.")
+        algo = (sig.get("a") or "").lower()
+        if algo and "sha1" in algo:
+            finding("warning", "DKIM_WEAK_ALGORITHM",
+                    f"DKIM signature uses the deprecated algorithm '{algo}'; "
+                    "SHA-1 signatures are no longer considered trustworthy.")
+
+    # ------------------------------------------------------------------
+    # ARC — evidence FOR legitimacy as often as against it.
+    #
+    # When a mailing list or a forwarder relays a message, SPF fails at the
+    # final hop through no fault of the original sender. A valid ARC chain
+    # preserves the authentication result from before the forward, so it
+    # explains the failure instead of leaving it looking like spoofing.
+    # ------------------------------------------------------------------
+    arc = parse_arc(headers)
+    if arc["present"]:
+        if arc["cv"] == "pass":
+            spf_failed = auth.get("spf") in AUTH_FAIL | AUTH_SOFT
+            dkim_failed = auth.get("dkim") in AUTH_FAIL | AUTH_SOFT
+            if spf_failed or dkim_failed:
+                finding("info", "ARC_EXPLAINS_AUTH_FAILURE",
+                        f"A valid ARC chain ({arc['instances']} hop(s), "
+                        "cv=pass) shows the message authenticated correctly "
+                        "before it was forwarded — the local SPF/DKIM failure "
+                        "is likely caused by the forwarding, not by spoofing.")
+            else:
+                finding("info", "ARC_CHAIN_PRESENT",
+                        f"Message carries a valid ARC chain "
+                        f"({arc['instances']} hop(s)) — it was forwarded or "
+                        "relayed through an intermediary.")
+        elif arc["cv"] == "fail":
+            finding("warning", "ARC_CHAIN_INVALID",
+                    "The ARC chain fails validation (cv=fail) — the "
+                    "forwarding history has been altered or forged.")
+
+    # ------------------------------------------------------------------
+    # Sending software and originating IP
+    # ------------------------------------------------------------------
+    mailer = identify_mailer(headers)
+    if mailer["flagged"]:
+        needle, why = mailer["flagged"]
+        finding("info", "SUSPICIOUS_MAILER",
+                f"Sent by '{needle}' ({why}). Legitimate mail uses these "
+                "too, so treat it as context rather than proof.")
+
+    orig_ip_value = None   # resolved after the Received chain is parsed
+
+    # ------------------------------------------------------------------
     # Routing (Received chain)
     # ------------------------------------------------------------------
     received = headers.get("received") or []
     if isinstance(received, str):
         received = [received]
     hops = parse_received(received)
+
+    # X-Originating-IP is only meaningful next to the Received chain, so it
+    # is evaluated here rather than with the other header checks.
+    orig_ip = first(headers.get("x-originating-ip"))
+    if orig_ip:
+        m = re.search(r"[0-9a-fA-F.:]{7,}", str(orig_ip))
+        if m:
+            try:
+                candidate = m.group(0)
+                ip_obj = ipaddress.ip_address(candidate)
+                orig_ip_value = candidate
+                if not ip_obj.is_global:
+                    finding("info", "ORIGINATING_IP_PRIVATE",
+                            f"X-Originating-IP is a private/reserved address "
+                            f"({candidate}) — it identifies a host inside the "
+                            "sender's network, not a routable origin.")
+                else:
+                    first_hop_ip = next((h["from_ip"] for h in hops
+                                         if h.get("from_ip")), None)
+                    if first_hop_ip and first_hop_ip != candidate:
+                        finding("info", "ORIGINATING_IP_MISMATCH",
+                                f"X-Originating-IP ({candidate}) differs from "
+                                f"the first relay in the Received chain "
+                                f"({first_hop_ip}).")
+            except ValueError:
+                pass
     delays = [h["delay_seconds"] for h in hops
               if h.get("delay_seconds") is not None]
     total_transit = sum(delays) if delays else None
@@ -529,8 +726,37 @@ def analyze(headers: dict) -> dict:
     # Risk score: weighted sum of findings, capped at 100.
     #   critical = 25, warning = 10, info = 3
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Risk score = penalties − credits.
+    #
+    # Until now the score could only go up, which is how a security tool ends
+    # up calling everything suspicious and being ignored. Credits exist for
+    # the cases where a finding has a known innocent explanation that the
+    # evidence itself supports. They are deliberately few and each one has to
+    # be justified by a positive signal, never by the absence of a negative.
+    # ------------------------------------------------------------------
     weights = {"critical": 25, "warning": 10, "info": 3}
-    risk = min(100, sum(weights[f["severity"]] for f in findings))
+    penalties = sum(weights[f["severity"]] for f in findings)
+
+    credits = []
+    codes = {f["code"] for f in findings}
+    if "ARC_EXPLAINS_AUTH_FAILURE" in codes:
+        # A valid ARC chain shows the message authenticated before it was
+        # forwarded, so the local SPF/DKIM failure is the forwarder's doing.
+        # Refund most of what those failures cost — but not all of it: ARC
+        # only vouches for the hop that sealed it.
+        refund = sum(weights[f["severity"]] for f in findings
+                     if f["code"] in {"SPF_FAIL", "SPF_WEAK",
+                                      "DKIM_FAIL", "DKIM_WEAK",
+                                      "DMARC_FAIL", "DMARC_WEAK"})
+        if refund:
+            credits.append({
+                "code": "ARC_FORWARDING_CREDIT",
+                "points": -min(refund, 40),
+                "reason": "a valid ARC chain attributes the authentication "
+                          "failure to forwarding rather than to spoofing"})
+
+    risk = max(0, min(100, penalties + sum(c["points"] for c in credits)))
     level = "high" if risk >= 60 else "medium" if risk >= 30 else "low"
     n_crit = sum(1 for f in findings if f["severity"] == "critical")
     n_warn = sum(1 for f in findings if f["severity"] == "warning")
@@ -544,7 +770,11 @@ def analyze(headers: dict) -> dict:
 
     return {
         "summary": {"verdict": verdict, "risk_score": risk,
-                    "risk_level": level},
+                    "risk_level": level,
+                    # Shown separately so the arithmetic stays auditable:
+                    # nobody should have to guess why a score dropped.
+                    "penalty_points": penalties,
+                    "credits": credits},
         "identity": {
             "from": frm, "reply_to": reply_to,
             "return_path": return_path, "alignment": alignment,
@@ -559,10 +789,21 @@ def analyze(headers: dict) -> dict:
             }},
         "authentication": {
             **auth,
+            # Who actually signed, as opposed to whether a signature verified.
+            "dkim_signatures": [{"d": g["d"], "s": g["s"], "a": g["a"]}
+                                for g in dkim_sigs],
+            # Forwarding history; a valid chain can explain an SPF failure.
+            "arc": arc,
             "raw_authentication_results":
                 first(headers.get("authentication-results")),
             "raw_received_spf": first(headers.get("received-spf")),
         },
+        # Sending software and the claimed origin host.
+        "origin": {"x_mailer": mailer["x_mailer"],
+                   "user_agent": mailer["user_agent"],
+                   "flagged_mailer": (mailer["flagged"][0]
+                                      if mailer["flagged"] else None),
+                   "x_originating_ip": orig_ip_value},
         "routing": {"hop_count": len(hops),
                     "total_transit_seconds": total_transit, "hops": hops},
         "findings": findings,

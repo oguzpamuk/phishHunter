@@ -166,6 +166,38 @@ async function render() {
       </div>`));
   }
 
+  /* 5a — Images & QR codes */
+  const mediaImgs = (rep.iocs?.media?.images) || [], aiImg = rep.image_ai_analysis;
+  if (mediaImgs.length || aiImg) {
+    let flag = "";
+    if (aiImg?.injection_suspected) {
+      flag = `<div style="background:rgba(231,76,60,.15);border-left:3px solid var(--malicious);
+        padding:8px 12px;margin-bottom:10px;font-size:13.5px">
+        <b>Prompt-injection attempt inside an image:</b> ${esc(aiImg.injection_evidence)}</div>`;
+    }
+    let inner = flag;
+    if (mediaImgs.length) {
+      inner += `<table class="list"><thead><tr><th>Image</th><th>From</th>
+        <th>QR scan</th><th>QR payload</th></tr></thead><tbody>` +
+        mediaImgs.map(i => `<tr><td class="mono">${esc(i.name)}</td>
+          <td>${esc(i.source)}</td><td>${esc(i.qr_status)}</td>
+          <td class="mono">${esc((i.qr_payloads || []).join(", "))}</td></tr>`).join("") +
+        `</tbody></table>`;
+    }
+    if (aiImg) {
+      inner += `<div style="margin-top:12px">` + kv([
+        ["AI verdict", `<span class="badge ${esc(aiImg.verdict)}">${esc(aiImg.verdict)}</span>
+                        (${esc(aiImg.confidence)}) · <span class="score">${esc(aiImg.risk_score)}/100</span>`],
+        ["Depicts", esc(aiImg.depicts)],
+        ["Impersonated brand", esc(aiImg.impersonated_brand)],
+        ["QR code present", aiImg.qr_code_present ? "<b>yes</b>" : "no"],
+        ["Requests credentials", aiImg.credential_request ? "<b>yes</b>" : "no"],
+        ["Text read from image", esc(aiImg.text_found)],
+        ["AI reasoning", esc(aiImg.reasoning)]]) + `</div>`;
+    }
+    parts.push(card(sec("Images &amp; QR codes") + inner));
+  }
+
   /* 5b — Attachments: what each file really is, versus what it claims */
   const atts = rep.iocs?.attachments || [];
   if (atts.length) {

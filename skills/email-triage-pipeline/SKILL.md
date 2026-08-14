@@ -61,6 +61,11 @@ python3 scripts/triage_pipeline.py mail.eml --ai -o report.json --pretty
   (auto-search order: `$EMAIL_TRIAGE_SKILLS_ROOT` → side-by-side install →
   `/mnt/skills/user` → `~/.claude/skills`).
 - Stage toggles: `--skip-intel`, `--skip-whois`, `--skip-body`.
+- `--ai-images` (optional): reads the message's embedded images with a vision
+  model — text rendered as a picture, imitated brand logos, fake login screens
+  and QR codes. Requires `ANTHROPIC_API_KEY`; independent of the other AI
+  flags. QR payloads are decoded deterministically first when pyzbar or
+  OpenCV is installed, and those values are given to the model as ground truth.
 - `--ai-body` (optional): adds a semantic AI pass over the message body.
   Language-independent, so it catches phishing the rule-based English keyword
   lists score at zero. Requires `ANTHROPIC_API_KEY`; independent of `--ai`.
@@ -97,6 +102,14 @@ JSON report (stdout, or `-o file` + one-line verdict on stdout) containing:
   "reasoning": "...", "injection_suspected": false,
   "model": "...", "usage": {...}, "attempts": 1
 },
+"image_ai_analysis": {             // only with --ai-images
+  "verdict": "malicious", "confidence": "high", "risk_score": 85,
+  "text_found": "text transcribed from the picture",
+  "impersonated_brand": "PTT Kargo", "depicts": "payment notice",
+  "qr_code_present": true, "qr_text": "", "credential_request": false,
+  "reasoning": "...", "injection_suspected": false,
+  "images_sent": ["qr.png"], "model": "...", "usage": {...}
+},
 "ai_analysis": {                   // only with --ai
   "model": "claude-sonnet-4-6", "verdict": "malicious", "confidence": "high",
   "reasoning": "...", "recommended_actions": ["Block sender domain", "..."],
@@ -107,6 +120,13 @@ JSON report (stdout, or `-o file` + one-line verdict on stdout) containing:
   "attempts": 1                    // API calls used (retries on 429/5xx)
 }
 ```
+
+The analyst bundle carries every stage's conclusions — header findings,
+authentication, **both** body assessments, IOCs, attachment analysis (real file
+type, extension mismatches, archive contents), intel verdicts, WHOIS ages, YARA
+matches, the heuristic verdict with its signals, and any stage errors. When
+`--ai-body` also ran, its semantic reading is included so the analyst does not
+mistake a low English-keyword score for a harmless body.
 
 ### The AI stage is hardened against the email it is reading
 
@@ -138,6 +158,13 @@ gateway (corporate proxy, LiteLLM, self-hosted relay).
 (max 30) · body ×0.20 (max 20) · domain <30 days +15 (<180d +8) ·
 risky attachment extension +10 · HTML-only hidden links +5.
 Thresholds: ≥70 malicious, ≥40 suspicious, else clean.
+
+**Image signals never double-count either.** A message that is mostly a
+picture scores +20 as a blind spot — content deliberately placed beyond every
+text check. Once `--ai-images` has actually read the picture the blind spot is
+gone, so that penalty is replaced by the model's assessment rather than added
+to it. URLs decoded from QR codes are scored through the normal IOC signals;
+what the QR signal scores is the delivery method, not the link.
 
 **Body signals never double-count.** The rule-based score and the `--ai-body`
 assessment measure the same property, so the **stronger of the two** is used

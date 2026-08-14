@@ -355,6 +355,50 @@ def sec_body(report):
     return out
 
 
+def sec_images(report, max_rows):
+    """Section 4c — embedded images, QR payloads, and the AI reading.
+
+    Appears only when the message carried images. It matters most when the
+    body is a picture: this is the only place the report can say what the
+    recipient was actually shown.
+    """
+    media = ((report.get("iocs") or {}).get("media")) or {}
+    images = media.get("images") or []
+    ai_img = report.get("image_ai_analysis")
+    if not images and not ai_img:
+        return []
+    out = [Paragraph("4c. Images &amp; QR Codes", S_H2)]
+    if images:
+        rows = [[i.get("name"), i.get("source"), i.get("size_bytes"),
+                 i.get("qr_status"),
+                 ", ".join(i.get("qr_payloads") or []) or None]
+                for i in images]
+        out.append(make_table(["Image", "From", "Bytes", "QR scan",
+                               "QR payload"], rows, [40, 22, 16, 24, 78],
+                              max_rows, mono_cols=(4,)))
+    if ai_img:
+        out.append(Spacer(1, 6))
+        out.append(Paragraph("<b>AI image analysis</b>", S_BODY))
+        if ai_img.get("injection_suspected"):
+            out.append(Paragraph(
+                '<font color="#B71C1C"><b>Prompt-injection attempt inside an '
+                'image:</b></font> '
+                + esc(ai_img.get("injection_evidence"), max_len=400), S_BODY))
+        rows = [["Verdict", f"{str(ai_img.get('verdict','')).upper()} "
+                            f"({ai_img.get('confidence')})"],
+                ["Risk score", f"{ai_img.get('risk_score')}/100"],
+                ["Depicts", ai_img.get("depicts")],
+                ["Impersonated brand", ai_img.get("impersonated_brand")],
+                ["QR code present", "YES" if ai_img.get("qr_code_present") else "no"],
+                ["Requests credentials",
+                 "YES" if ai_img.get("credential_request") else "no"],
+                ["Text read from image", ai_img.get("text_found")]]
+        out.append(make_table(["Field", "Value"], rows, [45, 135], 99))
+        out.append(Spacer(1, 3))
+        out.append(Paragraph(esc(ai_img.get("reasoning"), max_len=1500), S_BODY))
+    return out
+
+
 def sec_iocs(report, max_rows):
     """Section 7 — extracted IOC tables."""
     rep = report.get("iocs")
@@ -522,6 +566,7 @@ def build_pdf(report, out_path, title, max_rows):
     story += sec_signals(report, max_rows)
     story += sec_headers(report, max_rows)
     story += sec_body(report)
+    story += sec_images(report, max_rows)
     story += sec_iocs(report, max_rows)
     story += sec_intel(report, max_rows)
     story += sec_whois(report, max_rows)

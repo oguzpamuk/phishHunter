@@ -110,11 +110,11 @@ PIPELINE = os.path.join(REPO_ROOT, "skills", "email-triage-pipeline",
 # The ordered stage list mirrored from the pipeline — used to render the
 # progress rail in a stable order even before any event has fired.
 STAGE_ORDER = ["parse", "headers", "body_anomaly", "body_ai", "yara",
-               "ioc_extract", "intel", "whois", "ai"]
+               "ioc_extract", "image_ai", "intel", "whois", "ai"]
 STAGE_LABELS = {
     "parse": "Parse email", "headers": "Header analysis",
     "body_anomaly": "Body scoring", "body_ai": "AI body analysis",
-    "yara": "YARA scan",
+    "yara": "YARA scan", "image_ai": "AI image analysis",
     "ioc_extract": "IOC extraction", "intel": "Threat intel",
     "whois": "WHOIS enrichment", "ai": "AI analyst",
 }

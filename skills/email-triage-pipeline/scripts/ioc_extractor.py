@@ -117,6 +117,14 @@ RE_SHA256 = re.compile(r"\b[a-fA-F0-9]{64}\b")
 RE_HTML_LINK = re.compile(r"""(?:href|src)\s*=\s*["']([^"']+)["']""",
                           re.IGNORECASE)
 
+# Full anchor elements, so the visible text can be compared with the target.
+# A link that reads "https://www.bank.com" but points somewhere else is one
+# of the most reliable phishing indicators there is, and it is invisible to
+# any check that only looks at href values.
+RE_ANCHOR = re.compile(
+    r"<a\b[^>]*?href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+    re.IGNORECASE | re.DOTALL)
+
 # File-name endings that frequently carry malware in email attachments.
 # Used to raise the "risky_extension" flag on attachments.
 RISKY_EXTENSIONS = {
@@ -424,6 +432,182 @@ def scan_text(store: IOCStore, text: str, source: str):
         store.add_domain(m.group(1), source)
 
 
+def find_anchor_mismatches(html, refang_fn):
+    """Compare each link's visible text with where it actually points.
+
+    Input : html       — the HTML body
+            refang_fn  — the refang helper, applied to both sides so that a
+                         defanged decoy is compared fairly
+    Output: list of dicts, one per deceptive link:
+              {"text_shown", "text_domain", "href", "href_domain"}
+
+    Only links whose VISIBLE TEXT is itself a URL or bare domain are
+    considered: "click here" pointing anywhere is normal, but text that
+    reads like `https://www.bank.example/login` while the href goes to
+    `evil.example` is a deliberate lie about the destination.
+
+    Comparison is on the registrable domain, so `mail.bank.example` and
+    `bank.example` are treated as the same organisation and tracking or
+    redirect wrappers on the same domain do not produce noise.
+    """
+    mismatches = []
+    for m in RE_ANCHOR.finditer(html or ""):
+        href = refang_fn(m.group(1).strip())
+        # Visible text with tags stripped, e.g. <b>bank.example</b>.
+        shown = unescape(re.sub(r"<[^>]+>", "", m.group(2) or "")).strip()
+        shown = refang_fn(shown)
+        if not shown or not href.lower().startswith(("http://", "https://")):
+            continue
+        # Does the visible text claim to be a location?
+        text_host = None
+        um = RE_URL.search(shown)
+        if um:
+            try:
+                text_host = urlparse(um.group(0)).hostname
+            except ValueError:
+                text_host = None
+        else:
+            dm = RE_DOMAIN.fullmatch(shown.strip().strip("/"))
+            if dm:
+                text_host = dm.group(1)
+        if not text_host:
+            continue
+        try:
+            href_host = urlparse(href).hostname or ""
+        except ValueError:
+            continue
+
+        def registrable(host):
+            parts = (host or "").lower().strip(".").split(".")
+            return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+        if registrable(text_host) and \
+                registrable(text_host) != registrable(href_host):
+            mismatches.append({
+                "text_shown": shown[:200],
+                "text_domain": text_host.lower(),
+                "href": href[:300],
+                "href_domain": (href_host or "").lower(),
+            })
+    return mismatches
+
+
+def decode_qr_codes(image_bytes):
+    """Decode any QR codes in an image, if a decoder is installed.
+
+    Input : image_bytes — raw bytes of a PNG/JPEG/GIF/etc.
+    Output: (payloads, status)
+              payloads — list of decoded strings (usually URLs)
+              status   — "decoded" | "no_decoder" | "unreadable" | "none"
+
+    QR decoding needs a native library, which would break this skill's
+    "standard library only" promise if it were mandatory. So it is optional:
+    pyzbar first (most accurate), then OpenCV as a fallback. With neither
+    installed the caller still learns that an image was present and can hand
+    it to the AI image stage instead of silently ignoring it.
+
+    Install one of:
+        pip install pyzbar       (also needs the libzbar system package)
+        pip install opencv-python-headless
+    """
+    # --- Preferred: pyzbar -------------------------------------------------
+    try:
+        from pyzbar.pyzbar import decode as zbar_decode   # type: ignore
+        from PIL import Image                             # type: ignore
+        img = Image.open(io.BytesIO(image_bytes))
+        found = [d.data.decode("utf-8", "replace") for d in zbar_decode(img)
+                 if d.data]
+        return found, ("decoded" if found else "none")
+    except ImportError:
+        pass
+    except Exception:
+        return [], "unreadable"
+
+    # --- Fallback: OpenCV --------------------------------------------------
+    try:
+        import cv2                                        # type: ignore
+        import numpy as np                                # type: ignore
+        arr = np.frombuffer(image_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return [], "unreadable"
+        detector = cv2.QRCodeDetector()
+        ok, payloads, _pts, _ = detector.detectAndDecodeMulti(img)
+        if ok:
+            found = [p for p in payloads if p]
+            return found, ("decoded" if found else "none")
+        return [], "none"
+    except ImportError:
+        return [], "no_decoder"
+    except Exception:
+        return [], "unreadable"
+
+
+# Inline images embedded directly in the HTML rather than attached, e.g.
+# <img src="data:image/png;base64,iVBORw0KGgo...">. Attackers use these to
+# ship a lure that no text-based check can read.
+RE_DATA_URI_IMAGE = re.compile(
+    r"""data:image/(png|jpe?g|gif|bmp|webp);base64,([A-Za-z0-9+/=\s]{40,})""",
+    re.IGNORECASE)
+
+
+def collect_images(parsed, html):
+    """Gather every image carried by the message, from both places it hides.
+
+    Input : parsed — the email-parser output (for inline/attached parts)
+            html   — the HTML body (for data: URIs)
+    Output: list of {"source", "name", "bytes", "size_bytes"} dicts.
+            "source" is "attachment" or "data-uri" so the report can say
+            where each image came from.
+
+    Only images are returned; other attachments are handled elsewhere.
+    """
+    images = []
+    for att in parsed.get("attachments") or []:
+        ctype = (att.get("content_type") or "").lower()
+        name = att.get("filename") or att.get("content_id") or "inline-image"
+        looks_image = ctype.startswith("image/") or \
+            name.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp",
+                                   ".webp"))
+        if not looks_image or not att.get("data_base64"):
+            continue
+        try:
+            raw = base64.b64decode(att["data_base64"])
+        except Exception:
+            continue
+        images.append({"source": "attachment", "name": name, "bytes": raw,
+                       "size_bytes": len(raw)})
+
+    for i, m in enumerate(RE_DATA_URI_IMAGE.finditer(html or "")):
+        try:
+            raw = base64.b64decode(re.sub(r"\s+", "", m.group(2)))
+        except Exception:
+            continue
+        images.append({"source": "data-uri",
+                       "name": f"embedded-image-{i + 1}.{m.group(1).lower()}",
+                       "bytes": raw, "size_bytes": len(raw)})
+    return images
+
+
+def measure_visible_text(html, text_body):
+    """Estimate how much readable text the message actually has.
+
+    Input : html      — HTML body (may be None)
+            text_body — plain-text body (may be None)
+    Output: character count of the visible text, ignoring markup and
+            whitespace runs.
+
+    Used to spot the "the whole email is one picture" technique: a message
+    with images but almost no text has deliberately put its content beyond
+    the reach of every text-based check, including the AI body stage.
+    """
+    if text_body and text_body.strip():
+        return len(re.sub(r"\s+", " ", text_body).strip())
+    if html:
+        return len(re.sub(r"\s+", " ", strip_html(html)).strip())
+    return 0
+
+
 def extract_from_parsed_email(parsed: dict, store: IOCStore,
                               warnings: list, do_refang: bool):
     """Walk a parsed-email JSON dict and harvest IOCs from each region.
@@ -439,6 +623,9 @@ def extract_from_parsed_email(parsed: dict, store: IOCStore,
     """
     prep = (lambda s: refang(s)) if do_refang else (lambda s: s)
 
+    anchor_mismatches = []
+    images_out = []
+    visible_chars = 0
     # --- Envelope / identity fields -------------------------------------
     sender_info = None
     frm = parsed.get("from") or {}
@@ -482,6 +669,34 @@ def extract_from_parsed_email(parsed: dict, store: IOCStore,
             if target.lower().startswith(("http://", "https://", "ftp://")):
                 store.add_url(target, "html")
         scan_text(store, prep(strip_html(html)), "html")
+        # Links whose visible text lies about their destination.
+        anchor_mismatches.extend(find_anchor_mismatches(html, prep))
+
+    # --- Embedded images and QR codes -----------------------------------
+    # A QR code is just a URL the recipient cannot read, so any payload we
+    # decode is fed into the normal IOC pipeline: it gets reputation
+    # lookups, WHOIS age and everything else a typed link would get.
+    html_body = body.get("html") or ""
+    images = collect_images(parsed, html_body)
+    visible_chars = measure_visible_text(html_body, body.get("text"))
+    for img in images:
+        payloads, status = decode_qr_codes(img["bytes"])
+        entry = {"source": img["source"], "name": img["name"],
+                 "size_bytes": img["size_bytes"], "qr_status": status,
+                 "qr_payloads": payloads}
+        for payload in payloads:
+            refanged = prep(payload)
+            if refanged.lower().startswith(("http://", "https://", "ftp://")):
+                store.add_url(refanged, "qr_code")
+            else:
+                # Non-URL QR payloads still matter: mailto:, tel:, WIFI:,
+                # or a bare domain are all worth showing the analyst.
+                scan_text(store, refanged, "qr_code")
+        images_out.append(entry)
+        if status == "no_decoder":
+            warnings.append(
+                "QR decoding unavailable — install pyzbar or "
+                "opencv-python-headless to read codes inside images")
 
     # --- Attachments ----------------------------------------------------
     attachments_out = []
@@ -542,11 +757,13 @@ def extract_from_parsed_email(parsed: dict, store: IOCStore,
             # ZIP listing: contents, risky entries, encryption flag.
             "archive": archive,
         })
-    return sender_info, attachments_out
+    return (sender_info, attachments_out, anchor_mismatches,
+            {"images": images_out, "visible_text_chars": visible_chars})
 
 
 def build_result(store: IOCStore, input_kind: str, sender, attachments,
-                 warnings, use_allowlist: bool, include_private: bool):
+                 warnings, use_allowlist: bool, include_private: bool,
+                 anchor_mismatches=None, media=None):
     """Assemble the final JSON-serializable result dict.
 
     Applies output filters:
@@ -585,6 +802,11 @@ def build_result(store: IOCStore, input_kind: str, sender, attachments,
         "input_kind": input_kind,
         "iocs": iocs,
         "attachments": attachments,
+        # Links whose visible text names a different domain than the target.
+        "anchor_mismatches": anchor_mismatches or [],
+        # Embedded images, any QR payloads decoded from them, and how much
+        # readable text the message actually had.
+        "media": media or {"images": [], "visible_text_chars": 0},
         "sender": sender,
         "counts": {k: len(v) for k, v in iocs.items()}
                   | {"attachments": len(attachments)},
@@ -614,7 +836,8 @@ def main(argv=None) -> int:
 
     warnings = []
     store = IOCStore()
-    sender, attachments = None, []
+    sender, attachments, anchor_mismatches = None, [], []
+    media = {"images": [], "visible_text_chars": 0}
     do_refang = not args.no_refang
 
     try:
@@ -625,8 +848,8 @@ def main(argv=None) -> int:
             with open(args.input, "r", encoding="utf-8", errors="replace") as f:
                 parsed = json.load(f)
             input_kind = "parsed_email"
-            sender, attachments = extract_from_parsed_email(
-                parsed, store, warnings, do_refang)
+            (sender, attachments, anchor_mismatches, media) = \
+                extract_from_parsed_email(parsed, store, warnings, do_refang)
         elif args.text is not None:
             input_kind = "raw_text"
             scan_text(store, refang(args.text) if do_refang else args.text,
@@ -647,8 +870,9 @@ def main(argv=None) -> int:
                 if not isinstance(parsed, dict):
                     raise ValueError
                 input_kind = "parsed_email"
-                sender, attachments = extract_from_parsed_email(
-                    parsed, store, warnings, do_refang)
+                (sender, attachments, anchor_mismatches, media) = \
+                    extract_from_parsed_email(parsed, store, warnings,
+                                              do_refang)
             except (json.JSONDecodeError, ValueError):
                 input_kind = "raw_text"
                 scan_text(store, refang(raw) if do_refang else raw, "body")
@@ -667,7 +891,9 @@ def main(argv=None) -> int:
     # ----------------------------------------------------------------------
     result = build_result(store, input_kind, sender, attachments, warnings,
                           use_allowlist=not args.no_allowlist,
-                          include_private=args.include_private)
+                          include_private=args.include_private,
+                          anchor_mismatches=anchor_mismatches,
+                          media=media)
     text = json.dumps(result, indent=2 if args.pretty else None,
                       ensure_ascii=False)
     if args.output:
