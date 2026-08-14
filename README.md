@@ -567,10 +567,33 @@ python3 skills/email-triage-pipeline/scripts/triage_pipeline.py mail.eml \
     --skills-root skills --ai -o report.json
 ```
 
+### Two verdicts, side by side
+
+Every report carries **two** verdicts, and the comparison is the point:
+
+```
+RULE-BASED : CLEAN       score=33.5/100  confidence=medium
+AI ANALYST : MALICIOUS   confidence=82/100  (DISAGREES)
+             Malicious: a Turkish credential lure the English keyword
+             rules could not score.
+```
+
+The rule-based verdict is reproducible and every point traces to a named
+signal — but it is blind in known ways: its keyword lists are English, it
+cannot read pictures, and it weighs each signal the same regardless of
+context. The AI analyst sees the whole evidence bundle and reports its own
+verdict with a numeric confidence, a one-line summary, and — most usefully —
+an explicit assessment of the deterministic score: what the rules missed, or
+what they over-weighted.
+
+Both verdicts appear in the text report, the PDF (as stacked banners), and
+the web UI. The dashboard counts disagreements and links straight to them, and
+history has an **AI disagrees** filter, because those runs are the ones most
+worth opening: they are where the automated score was wrong.
+
 **The AI verdict never overrides the score.** The heuristic engine stays the
-source of truth so results remain reproducible and explainable; the model is a
-second opinion. When the two disagree, that is flagged in the text report, the
-PDF, and the web UI — a disagreement is exactly the case worth a human look.
+source of truth so results remain reproducible; the model is a second opinion
+that tells you when to distrust the first one.
 
 **What the analyst sees.** The bundle carries every stage's conclusions: header
 findings (including sender-identity deception), authentication results, both

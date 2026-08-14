@@ -148,6 +148,17 @@ def init_db():
                 confidence   TEXT,
                 error        TEXT
             )""")
+        # Columns added after the first release. SQLite has no "ADD COLUMN
+        # IF NOT EXISTS", so existing databases are migrated by inspecting
+        # the table and adding what is missing — an old console keeps its
+        # history instead of needing a wipe.
+        have = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(analyses)")}
+        for col, ddl in (("ai_verdict", "TEXT"),
+                         ("ai_confidence", "INTEGER"),
+                         ("ai_agrees", "INTEGER")):
+            if col not in have:
+                conn.execute(f"ALTER TABLE analyses ADD COLUMN {col} {ddl}")
 
 
 def sanitize_filename(name):
@@ -198,11 +209,16 @@ def run_analysis(analysis_id, email_path, options):
             with open(report_path, "r", encoding="utf-8") as f:
                 report = json.load(f)
             v = report.get("verdict") or {}
+            ai = report.get("ai_analysis") or {}
             with db() as conn:
                 conn.execute(
                     "UPDATE analyses SET status='done', verdict=?, score=?, "
-                    "confidence=? WHERE id=?",
+                    "confidence=?, ai_verdict=?, ai_confidence=?, "
+                    "ai_agrees=? WHERE id=?",
                     (v.get("verdict"), v.get("score"), v.get("confidence"),
+                     ai.get("verdict"), ai.get("confidence_score"),
+                     (None if ai.get("agrees_with_heuristic") is None
+                      else int(bool(ai.get("agrees_with_heuristic")))),
                      analysis_id))
         else:
             with db() as conn:
@@ -456,9 +472,14 @@ class Handler(BaseHTTPRequestHandler):
                     counts["error"] += row["c"]
                 elif row["verdict"] in counts:
                     counts[row["verdict"]] += row["c"]
+            row = conn.execute(
+                "SELECT COUNT(*) c FROM analyses WHERE ai_agrees = 0"
+            ).fetchone()
+            counts["ai_disagreements"] = row["c"] if row else 0
             recent = [dict(r) for r in conn.execute(
                 "SELECT id, filename, created_utc, status, verdict, score, "
-                "confidence FROM analyses ORDER BY created_utc DESC LIMIT 8")]
+                "confidence, ai_verdict, ai_confidence, ai_agrees "
+                "FROM analyses ORDER BY created_utc DESC LIMIT 8")]
         return self._json({"counts": counts, "recent": recent})
 
     def api_analyses(self, q):
@@ -473,6 +494,10 @@ class Handler(BaseHTTPRequestHandler):
             clauses.append("verdict = ?"); params.append(verdict)
         elif verdict in ("error", "running"):
             clauses.append("status = ?"); params.append(verdict)
+        if verdict == "disagree":
+            # The most useful filter in the product: every run where the AI
+            # reached a different conclusion from the rules.
+            clauses.append("ai_agrees = 0")
         needle = (q.get("q") or [""])[0].strip()
         if needle:
             clauses.append("filename LIKE ?"); params.append(f"%{needle}%")
@@ -481,7 +506,8 @@ class Handler(BaseHTTPRequestHandler):
         with db() as conn:
             items = [dict(r) for r in conn.execute(
                 f"SELECT id, filename, created_utc, status, verdict, score, "
-                f"confidence FROM analyses {where} "
+                f"confidence, ai_verdict, ai_confidence, ai_agrees "
+                f"FROM analyses {where} "
                 f"ORDER BY created_utc DESC LIMIT ?", params + [limit])]
         return self._json({"items": items})
 

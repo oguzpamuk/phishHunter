@@ -40,7 +40,8 @@
         <span><b id="p-mal">0%</b> malicious</span>
         <span><b id="p-sus">0%</b> suspicious</span>
         <span><b id="p-clean">0%</b> clean</span>
-        <span style="margin-left:auto" id="running-note"></span>
+        <span style="margin-left:auto" id="disagree-note"></span>
+        <span id="running-note"></span>
       </div>
     </div>
 
@@ -49,7 +50,7 @@
       <div class="card">
         <h2 style="margin:0 0 8px; font-size:16px;">Recent analyses</h2>
         <table class="list" id="recent">
-          <thead><tr><th>File</th><th>Verdict</th><th>Score</th><th>When</th></tr></thead>
+          <thead><tr><th>File</th><th>Rule-based</th><th>Score</th><th>AI analyst</th><th>When</th></tr></thead>
           <tbody></tbody>
         </table>
         <div class="empty" id="recent-empty" style="display:none">
@@ -101,6 +102,13 @@ async function refresh() {
   spec.children[2].style.flex = counts.clean || 0.02;
   document.getElementById("running-note").textContent =
     counts.running ? `${counts.running} running now` : "";
+  // Surfaced on the dashboard because these are the runs most worth
+  // opening: the rules and the model reached different conclusions.
+  const dis = document.getElementById("disagree-note");
+  dis.innerHTML = counts.ai_disagreements
+    ? `<a href="/history?f=disagree" style="color:var(--suspicious)">&#9888;
+       ${counts.ai_disagreements} AI disagreement${counts.ai_disagreements===1?"":"s"}</a>`
+    : "";
 
   const tbody = document.querySelector("#recent tbody");
   tbody.innerHTML = "";
@@ -109,9 +117,14 @@ async function refresh() {
   for (const row of recent) {
     const tr = document.createElement("tr");
     tr.className = "row";
+    const aiCell = row.ai_verdict
+      ? `<span class="badge ${row.ai_verdict}">${row.ai_verdict}</span>` +
+        (row.ai_agrees === 0 ? ` <span style="color:var(--suspicious)">&#9888;</span>` : "")
+      : `<span style="color:var(--faint)">–</span>`;
     tr.innerHTML = `<td class="mono">${row.filename}</td>
                     <td>${badge(row)}</td>
                     <td class="score">${row.score ?? "–"}</td>
+                    <td>${aiCell}</td>
                     <td style="color:var(--muted)">${fmtTime(row.created_utc)}</td>`;
     tr.onclick = () => location.href =
         row.status === "running" ? `/analyze?id=${row.id}` : `/report/${row.id}`;

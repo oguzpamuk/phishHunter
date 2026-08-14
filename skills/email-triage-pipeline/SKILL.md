@@ -112,6 +112,9 @@ JSON report (stdout, or `-o file` + one-line verdict on stdout) containing:
 },
 "ai_analysis": {                   // only with --ai
   "model": "claude-sonnet-4-6", "verdict": "malicious", "confidence": "high",
+  "confidence_score": 82,          // numeric, 0-100
+  "summary": "one sentence stating the verdict and its strongest reason",
+  "assessment_of_heuristic": "what the deterministic score missed or overstated",
   "reasoning": "...", "recommended_actions": ["Block sender domain", "..."],
   "agrees_with_heuristic": false,  // computed locally, not self-reported
   "injection_suspected": true,     // the email tried to steer the model

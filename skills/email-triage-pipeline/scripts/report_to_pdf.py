@@ -228,7 +228,7 @@ def sec_banner(report, title):
         ("RIGHTPADDING", (0, 0), (-1, -1), 8),
     ]))
     banner = Table(
-        [[Paragraph(f"<b>VERDICT: {theme['label']}</b>",
+        [[Paragraph(f"<b>RULE-BASED: {theme['label']}</b>",
                     ParagraphStyle("v", parent=S_BODY, fontSize=14,
                                    textColor=colors.white)),
           Paragraph(f"Risk score: <b>{esc(v.get('score'))}/100</b>"
@@ -244,7 +244,46 @@ def sec_banner(report, title):
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ("RIGHTPADDING", (0, 0), (-1, -1), 8),
     ]))
-    return [head, Spacer(1, 3), banner, Spacer(1, 8)]
+    out = [head, Spacer(1, 3), banner]
+
+    # Second banner: the AI analyst's independent verdict. Shown directly
+    # beneath the rule-based one because the comparison IS the information —
+    # a reader who sees only one number cannot tell where the automated
+    # score is blind.
+    ai = report.get("ai_analysis")
+    if ai:
+        ai_theme = VERDICT_THEME.get(ai.get("verdict"),
+                                     VERDICT_THEME["suspicious"])
+        agrees = ai.get("agrees_with_heuristic")
+        tag = "agrees with the rule-based verdict" if agrees \
+            else "DISAGREES — review manually"
+        ai_banner = Table(
+            [[Paragraph(f"<b>AI ANALYST: "
+                        f"{str(ai.get('verdict','')).upper()}</b>",
+                        ParagraphStyle("a1", parent=S_BODY, fontSize=14,
+                                       textColor=colors.white)),
+              Paragraph(f"Confidence: <b>{esc(ai.get('confidence_score'))}"
+                        f"/100</b> &nbsp;·&nbsp; {esc(tag)}",
+                        ParagraphStyle("a2", parent=S_BODY, fontSize=10,
+                                       textColor=colors.white, alignment=2))]],
+            colWidths=[90 * mm, 90 * mm])
+        ai_banner.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), ai_theme["bg"]),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        out += [Spacer(1, 2), ai_banner]
+        if ai.get("summary"):
+            out.append(Paragraph(f"<i>{esc(ai['summary'])}</i>",
+                                 ParagraphStyle("sum", parent=S_BODY,
+                                                fontSize=10.5,
+                                                textColor=INK,
+                                                spaceBefore=5)))
+    out.append(Spacer(1, 8))
+    return out
 
 
 def sec_email(report):
@@ -513,7 +552,13 @@ def sec_ai(report):
     out = [Paragraph("8. AI Analyst Assessment", S_H2),
            Paragraph(f"Model: <b>{esc(ai.get('model'))}</b> &nbsp;·&nbsp; "
                      f"Verdict: <b>{esc(str(ai.get('verdict')).upper())}</b> "
+                     f"&nbsp;·&nbsp; Confidence: "
+                     f"<b>{esc(ai.get('confidence_score'))}/100</b> "
                      f"({esc(ai.get('confidence'))})", S_BODY)]
+    if ai.get("assessment_of_heuristic"):
+        out.append(Paragraph(
+            "<b>On the rule-based score:</b> "
+            + esc(ai["assessment_of_heuristic"], max_len=600), S_BODY))
     # Surface the two things an analyst must not miss: a model that disagrees
     # with the deterministic engine, and an email that tried to manipulate it.
     if ai.get("agrees_with_heuristic") is False:

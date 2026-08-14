@@ -65,12 +65,34 @@ async function render() {
   document.getElementById("sub").textContent =
     `${rep.input_file?.split(/[\\/]/).pop() || ""} · run ${rep.run_id || id.slice(0,8)} · ${rep.started_utc || ""}`;
 
-  /* Verdict banner */
-  document.getElementById("banner").innerHTML =
+  /* Verdict banners — rule-based and AI, stacked. The comparison is the
+     information: a reader who sees one number cannot tell where the
+     automated score is blind. */
+  const aiv = rep.ai_analysis;
+  let banners =
     `<div class="verdict-banner ${v.verdict}">
-       <div class="v">VERDICT: ${esc(v.verdict).toUpperCase()}</div>
+       <div class="v">RULE-BASED: ${esc(v.verdict).toUpperCase()}</div>
        <div class="s">score ${esc(v.score)}/100 · confidence ${esc(v.confidence)}</div>
      </div>`;
+  if (aiv) {
+    const agrees = aiv.agrees_with_heuristic;
+    banners +=
+      `<div class="verdict-banner ${aiv.verdict}" style="margin-top:-12px">
+         <div class="v">AI ANALYST: ${esc(aiv.verdict).toUpperCase()}</div>
+         <div class="s">confidence ${esc(aiv.confidence_score)}/100 ·
+           ${agrees ? "agrees with the rule-based verdict"
+                    : "<b>DISAGREES — review manually</b>"}</div>
+       </div>`;
+    if (aiv.summary) {
+      banners += `<p style="margin:-8px 0 18px; font-size:15px; color:var(--ink)">
+                    ${esc(aiv.summary)}</p>`;
+    }
+  } else {
+    banners += `<p style="margin:-8px 0 18px; color:var(--faint); font-size:13.5px">
+                  AI analyst did not run — re-analyze with the AI option to get
+                  a second opinion on this verdict.</p>`;
+  }
+  document.getElementById("banner").innerHTML = banners;
 
   const parts = [];
 
@@ -279,7 +301,10 @@ async function render() {
     }
     parts.push(card(sec("AI analyst assessment") + flags + kv([
       ["Model", esc(ai.model)],
-      ["Verdict", `<span class="badge ${esc(ai.verdict)}">${esc(ai.verdict)}</span> (${esc(ai.confidence)})`],
+      ["Verdict", `<span class="badge ${esc(ai.verdict)}">${esc(ai.verdict)}</span>
+                   · <span class="score">${esc(ai.confidence_score)}/100</span> confidence
+                   (${esc(ai.confidence)})`],
+      ["On the rule-based score", esc(ai.assessment_of_heuristic)],
       ["Reasoning", esc(ai.reasoning)],
       ["Actions", esc((ai.recommended_actions || []).join(" · "))]])));
   }

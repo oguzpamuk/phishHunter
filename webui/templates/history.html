@@ -27,6 +27,7 @@
         <button data-v="malicious">Malicious</button>
         <button data-v="suspicious">Suspicious</button>
         <button data-v="clean">Clean</button>
+        <button data-v="disagree">AI disagrees</button>
         <button data-v="error">Errors</button>
         <button data-v="running">Running</button>
       </div>
@@ -38,8 +39,8 @@
     <div class="card">
       <table class="list" id="tbl">
         <thead><tr>
-          <th>File</th><th>Verdict</th><th>Score</th>
-          <th>Confidence</th><th>When</th>
+          <th>File</th><th>Rule-based</th><th>Score</th>
+          <th>AI analyst</th><th>When</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -83,10 +84,19 @@ async function load() {
   for (const row of items) {
     const tr = document.createElement("tr");
     tr.className = "row";
+    // The AI column carries the disagreement marker: scanning this list,
+    // an analyst should be able to spot the rows the rules got wrong.
+    const aiCell = row.ai_verdict
+      ? `<span class="badge ${row.ai_verdict}">${row.ai_verdict}</span>` +
+        (row.ai_confidence != null
+          ? ` <span class="mono" style="color:var(--muted)">${row.ai_confidence}</span>` : "") +
+        (row.ai_agrees === 0
+          ? ` <span style="color:var(--suspicious)" title="AI reached a different conclusion">&#9888;</span>` : "")
+      : `<span style="color:var(--faint)">–</span>`;
     tr.innerHTML = `<td class="mono">${row.filename}</td>
       <td>${badge(row)}</td>
       <td class="score">${row.score ?? "–"}</td>
-      <td style="color:var(--muted)">${row.confidence ?? "–"}</td>
+      <td>${aiCell}</td>
       <td style="color:var(--muted)">${fmtTime(row.created_utc)}</td>`;
     tr.onclick = () => location.href =
         row.status === "running" ? `/analyze?id=${row.id}` : `/report/${row.id}`;
@@ -106,6 +116,17 @@ document.getElementById("q").oninput = e => {
   clearTimeout(debounce);
   debounce = setTimeout(() => { q = e.target.value.trim(); load(); }, 250);
 };
+
+// Allow deep-linking from the dashboard, e.g. /history?f=disagree
+const preset = new URLSearchParams(location.search).get("f");
+if (preset) {
+  const btn = document.querySelector(`#verdict-filter button[data-v="${preset}"]`);
+  if (btn) {
+    document.querySelectorAll("#verdict-filter button")
+        .forEach(b => b.classList.toggle("on", b === btn));
+    verdict = preset;
+  }
+}
 
 load();
 setInterval(load, 8000);   /* keep running rows fresh */
