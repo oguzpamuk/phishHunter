@@ -206,7 +206,8 @@ the UI tails the JSON-Lines audit log, so what you see is exactly what ran.
 Analyses are indexed in a local SQLite database under `webui/data/`
 (uploads, reports, and logs live there too; delete the folder to reset).
 
-**Dashboard** — verdict distribution, totals, and the latest runs at a glance:
+**Dashboard** — verdict distribution, totals, both verdicts per run, and a
+count of the analyses where the AI reached a different conclusion:
 
 ![phishHunter dashboard](docs/screenshots/01-dashboard.png)
 
@@ -215,15 +216,25 @@ skip reasons, and errors streamed straight from the audit log:
 
 ![Live pipeline progress](docs/screenshots/02-analyze-progress.png)
 
-**Report** — the full evidence trail in the browser: colour-coded verdict,
-scored risk signals, header findings by severity, YARA matches, IOCs,
-threat intel, WHOIS ages, and the stage audit trail:
+**Report** — both verdicts as stacked banners, then the full evidence trail:
+scored risk signals, header findings by severity, body and image analysis,
+YARA matches, IOCs, attachment inspection, threat intel, WHOIS ages, and the
+stage audit trail:
 
 ![Analysis report](docs/screenshots/03-report.png)
 
-**History** — filter past analyses by verdict or search by filename:
+**History** — filter by verdict or by **AI disagreement**, and search by
+filename. The AI column carries a marker on every run where the model and the
+rules reached different conclusions:
 
 ![Analysis history](docs/screenshots/04-history.png)
+
+> The analyst commentary in these screenshots is illustrative — written to
+> match what the evidence in each sample supports — because the sample emails
+> are synthetic. Run the pipeline with `--ai` and your own key to see real
+> model output.
+
+
 
 > 🔒 **Security & privacy notes.** The console binds to `127.0.0.1` and has no
 > authentication or CSRF protection — it is a single-analyst workstation tool.
