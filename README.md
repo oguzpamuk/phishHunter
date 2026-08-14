@@ -10,7 +10,7 @@
 
 Give it a suspicious `.eml` or `.msg` file — get back a full SOC-style investigation and a weighted **malicious / suspicious / clean** verdict, with every signal explained.
 
-![phishHunter web console](docs/screenshots/01-dashboard.png)
+![phishHunter web console](docs/screenshots/dashboard-dual-verdict.png)
 
 ---
 
@@ -209,25 +209,25 @@ Analyses are indexed in a local SQLite database under `webui/data/`
 **Dashboard** — verdict distribution, totals, both verdicts per run, and a
 count of the analyses where the AI reached a different conclusion:
 
-![phishHunter dashboard](docs/screenshots/01-dashboard.png)
+![phishHunter dashboard](docs/screenshots/dashboard-dual-verdict.png)
 
 **Live pipeline progress** — every stage reports as it runs, with durations,
 skip reasons, and errors streamed straight from the audit log:
 
-![Live pipeline progress](docs/screenshots/02-analyze-progress.png)
+![Live pipeline progress](docs/screenshots/analyze-live-progress.png)
 
 **Report** — both verdicts as stacked banners, then the full evidence trail:
 scored risk signals, header findings by severity, body and image analysis,
 YARA matches, IOCs, attachment inspection, threat intel, WHOIS ages, and the
 stage audit trail:
 
-![Analysis report](docs/screenshots/03-report.png)
+![Analysis report](docs/screenshots/report-dual-verdict.png)
 
 **History** — filter by verdict or by **AI disagreement**, and search by
 filename. The AI column carries a marker on every run where the model and the
 rules reached different conclusions:
 
-![Analysis history](docs/screenshots/04-history.png)
+![Analysis history](docs/screenshots/history-ai-disagreements.png)
 
 > The analyst commentary in these screenshots is illustrative — written to
 > match what the evidence in each sample supports — because the sample emails
