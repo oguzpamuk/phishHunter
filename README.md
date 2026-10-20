@@ -118,109 +118,73 @@ Each skill folder follows the standard Agent Skill layout — a `SKILL.md` (YAML
 
 ## 🚀 Quick start
 
-### One engine, several ways in
-
-Every analysis is done by **one script**:
-`skills/email-triage-pipeline/scripts/triage_pipeline.py`. Everything else is
-a different way of calling it — pick whichever suits you, the result is the
-same report.
-
-| Way in | Who it is for | What it adds on top of the pipeline |
-|---|---|---|
-| `python3 phishhunter.py analyze …` (launcher) | Everyday use | Picks the Python environment, loads your API keys, adds `--skills-root` — then runs `triage_pipeline.py` with your options unchanged |
-| `python3 skills/email-triage-pipeline/scripts/triage_pipeline.py …` | Scripting, CI, reference | Nothing — this **is** the engine; all options are documented below |
-| `python3 webui/app.py` (or `phishhunter.py web`) | Point-and-click analysts | Runs `triage_pipeline.py` for every upload and shows the result |
-| Claude.ai / Claude Code skills | Conversational triage | Claude runs `triage_pipeline.py` and acts as the final analyst |
-
-The two command lines are interchangeable:
-
-```bash
-python3 phishhunter.py analyze mail.eml --format text
-# is exactly
-python3 skills/email-triage-pipeline/scripts/triage_pipeline.py mail.eml --skills-root skills --format text
-```
-
-The reference sections further down (exit codes, logging, YARA, AI stages)
-show the direct `triage_pipeline.py` form because it works everywhere;
-replace that prefix with `python3 phishhunter.py analyze` (and drop
-`--skills-root skills`) if you prefer the launcher. `phishhunter.py pdf …`
-and `phishhunter.py web …` likewise call `report_to_pdf.py` and
-`webui/app.py` with your arguments.
-
 ### Easy installation (recommended)
 
-No virtual environment needed — `install` uses the Python you already have:
+One script installs everything and sets up your API keys:
 
 ```bash
 git clone https://github.com/oguzpamuk/phishHunter.git
 cd phishHunter
-
-python3 phishhunter.py install                  # requirements + private key config
-python3 phishhunter.py config set virustotal    # paste the key (hidden input)
-#   repeat for the keys you have: abuseipdb, otx, urlscan, hybrid_analysis, anthropic
-
-python3 phishhunter.py analyze examples/sample_phishing.eml --format text
+python3 easy_install.py
 ```
 
-That is all. Everyday commands:
+It does three things:
+
+1. Installs `requirements.txt` (`requests`, `reportlab`) into the Python you
+   already use. No virtual environment is created unless you ask for one.
+2. Creates a private file for your API keys, outside the repository
+   (`~/.config/phishhunter/config.ini`, or `%APPDATA%\phishhunter\config.ini`
+   on Windows), readable only by you.
+3. Asks for each key with hidden input. Paste the ones you have, press Enter
+   to skip the rest. All keys are optional.
+
+At the end it prints the commands to run. From then on the pipeline and the
+web console read the keys from that file automatically, so nothing has to be
+exported:
 
 ```bash
-python3 phishhunter.py analyze suspicious.eml --ai -o report.json --pretty
-python3 phishhunter.py pdf report.json -o report.pdf
-python3 phishhunter.py web            # web console on http://127.0.0.1:8787
-python3 phishhunter.py doctor         # Python, dependencies, which keys are set (names only)
+python3 skills/email-triage-pipeline/scripts/triage_pipeline.py \
+    examples/sample_phishing.eml --format text
+python3 webui/app.py
 ```
 
-| Command | What it does |
+| Option | What it does |
 |---|---|
-| `install [--venv] [--yara]` | Install `requirements.txt` into the current Python (or an isolated `.venv` with `--venv`) and create the private key config |
-| `config set NAME` / `unset NAME` | Store / clear one API key — hidden input, never echoed or saved in shell history |
-| `config show` / `path` / `fix-perms` | Which keys are set (no values), where the file is, repair its permissions |
-| `analyze EMAIL [options]` | Run the triage pipeline; every `triage_pipeline.py` option passes through, `--skills-root` is added for you |
-| `pdf REPORT.json` · `web` | PDF report · local web console |
-| `doctor` | Health check: Python, environment, dependencies, config safety, key status |
-| `run SCRIPT [args]` | Run any repo script with the same environment and keys |
+| `python3 easy_install.py --venv` | Install into an isolated project `.venv` instead of your current Python |
+| `python3 easy_install.py --yara` | Also install `yara-python` for the YARA stage |
+| `python3 easy_install.py --keys` | Only (re)enter API keys, install nothing |
+| `python3 easy_install.py --no-keys` | Install without asking for keys (CI, scripts) |
+| `python3 easy_install.py --check` | Show Python, installed packages, the key file and which keys are set (names only) |
+| `python3 easy_install.py --fix-perms` | Make the key file private again if its permissions were changed |
 
 Good to know:
 
-- **Dependencies are optional.** The core analysis (parsing, headers, body,
-  IOCs, WHOIS, verdict, AI stages, web UI) is pure standard library.
-  `requests` only enables threat-intel lookups and `reportlab` PDF reports;
-  if they are missing the launcher says which feature is off and keeps going.
-- **Exit codes pass through** (`0` clean · `1` suspicious · `2` malicious ·
-  `3` fatal), so `phishhunter.py analyze` is CI-friendly.
-- Pure standard library launcher · Linux, macOS, Windows · Python 3.8+.
+- **The packages are optional.** Everything except threat-intel lookups
+  (`requests`) and PDF reports (`reportlab`) uses the standard library only.
+- **If pip refuses to install** with "externally-managed-environment"
+  (recent Debian, Ubuntu, Homebrew), the script explains why and offers to
+  use a `.venv` instead. On Debian/Ubuntu you can also run
+  `sudo apt install python3-requests python3-reportlab`.
+- **With `--venv`**, run the tools with the venv's Python, for example
+  `.venv/bin/python webui/app.py` (Windows: `.venv\Scripts\python.exe`), or
+  activate it first with `source .venv/bin/activate`. The script prints the
+  exact commands. If the `python3-venv` package is missing, it creates the
+  venv without pip and installs into it with your system pip.
+- Linux, macOS and Windows, Python 3.8 or newer.
 
-#### Optional: isolated virtual environment
+You can also skip the script: `pip install -r requirements.txt` and export
+the keys as environment variables, as shown in Option A.
 
-Only if you want one (or if your OS Python refuses pip installs — Debian /
-Ubuntu / Homebrew "externally-managed-environment", PEP 668; `install` offers
-it automatically in that case):
-
-```bash
-python3 phishhunter.py install --venv         # creates .venv and installs into it
-```
-
-From then on every launcher command runs on `.venv` by itself — no
-`source .venv/bin/activate` — and it re-syncs when `requirements.txt`
-changes (e.g. after `git pull`). Delete `.venv` (or pass `--no-venv`) to go
-back to your normal Python. Without `--venv` the launcher **never** creates
-a virtual environment. If `python3-venv` is missing, a pip-less venv filled
-by your system pip is used instead.
-
-You can of course skip the launcher entirely — Option A below uses only the
-scripts; the keys in the config file are still picked up.
-
-### Option A — Direct CLI (no launcher, no Claude)
+### Option A — Standalone CLI (no Claude required)
 
 ```bash
 git clone https://github.com/oguzpamuk/phishHunter.git
 cd phishHunter
-pip install -r requirements.txt          # optional: requests (threat intel) + reportlab (PDF)
+pip install -r requirements.txt          # requests (threat intel) + reportlab (PDF)
 
-# API keys: store them once in the private config (read automatically) ...
-python3 skills/email-triage-pipeline/scripts/phishhunter_config.py set virustotal
-# ...or export them per shell (exported values win over the config file):
+# API keys: store them once in the private key file (read automatically) ...
+python3 easy_install.py --keys
+# ...or export them per shell (exported values win over the key file):
 export VT_API_KEY="..."
 export ABUSEIPDB_API_KEY="..."
 export OTX_API_KEY="..."
@@ -269,27 +233,10 @@ Install each skill folder as an Agent Skill (upload the folder or a packaged `.s
 
 Claude runs the whole pipeline and acts as the final AI analyst layer — reasoning over the collected evidence, agreeing or disagreeing with the heuristic verdict, and recommending actions.
 
-Claude runs the same `triage_pipeline.py` (the launcher is not needed). Where
-the keys come from depends on where the scripts run:
-
-- **Claude Code** runs the scripts on your machine, so your private config
-  file (`phishhunter.py config set …`) and exported variables are used as
-  usual.
-- **Claude.ai** runs the scripts in Claude's own sandbox, which cannot see
-  the config file on your computer and may have no internet access. The
-  offline stages (parsing, headers, body, IOCs, YARA, verdict) work there;
-  threat-intel lookups and WHOIS need network access and keys available in
-  that environment.
-
-Install the skill folders together: the pipeline calls its sibling skills,
-and its `scripts/` folder must keep `phishhunter_config.py` next to
-`triage_pipeline.py`.
-
 ### Option C — Web UI (local analyst console)
 
 A zero-dependency web console built entirely on the Python standard library —
-no Flask, no npm, nothing to install. Every upload is analysed by the same
-`triage_pipeline.py`, so console and CLI reports are identical.
+no Flask, no npm, nothing to install.
 
 ```bash
 git clone https://github.com/oguzpamuk/phishHunter.git
@@ -298,11 +245,11 @@ cd phishHunter
 # Optional — only if you want threat intel and PDF export
 pip install -r requirements.txt
 
-# Optional — keys from the private config are loaded at start-up
-python3 phishhunter.py config set virustotal      # repeat for the keys you have
+# Optional — API keys, read from the private key file at start-up
+python3 easy_install.py --keys
 
 # Start the console
-python3 webui/app.py              # or: python3 phishhunter.py web
+python3 webui/app.py
 ```
 
 Then open **http://127.0.0.1:8787**.
@@ -312,8 +259,7 @@ Useful flags:
 ```bash
 python3 webui/app.py --port 9000          # use a port other than the default 8787
 python3 webui/app.py --skills-root /path/to/skills   # non-standard skill location
-python3 webui/app.py --max-parallel 4     # concurrent analyses (default 2)
-python3 webui/app.py --stage-timeout 300 --analysis-timeout 3600   # defaults
+python3 webui/app.py --max-parallel 4     # analyses running at once (default 2)
 ```
 
 The server prints its URL, the skills root it resolved, and its data directory
@@ -321,25 +267,10 @@ on startup. Stop it with `Ctrl-C`. Everything it writes — uploads, JSON
 reports, audit logs, and the SQLite index — lives under `webui/data/`; delete
 that folder to reset the console to a clean state.
 
-**Security model.** The console is a single-user tool with no login, so it
-protects itself in other ways:
-
-| Threat | Protection |
-|---|---|
-| A web page reading your reports through DNS rebinding | Only requests addressed to `127.0.0.1` / `localhost` / `[::1]` (plus `--allow-host` names) are answered |
-| A web page starting analyses (CSRF) and spending your API quota | Uploads need a custom request header and a matching `Origin`, which another site cannot send |
-| Script injection through email content or AI output | Every value is HTML-escaped, and a strict Content-Security-Policy with a per-page nonce blocks any injected script |
-| Other accounts on the machine reading analysed mail | `webui/data/` is private (folders `700`, files `600`) |
-| Resource exhaustion | At most `--max-parallel` analyses run at once (HTTP 429 otherwise) |
-
-Keep it on `127.0.0.1` (the default). To share it, bind with `--host 0.0.0.0`
-only behind an **authenticated** reverse proxy and pass the proxy's host name
-with `--allow-host triage.example.org`.
-
 | Page | What it does |
 |---|---|
 | **Dashboard** (`/`) | Verdict distribution spectrum, totals, live "running" counter, recent analyses |
-| **New analysis** (`/analyze`) | Drag-&-drop an `.eml`/`.msg`, toggle intel / URL sharing / WHOIS / the three AI stages (body, images, analyst) / YARA (upload your own rules), then watch a **live stage rail** — every pipeline stage lights up as it runs, with durations, skip reasons, and errors streamed straight from the audit log |
+| **New analysis** (`/analyze`) | Drag-&-drop an `.eml`/`.msg`, toggle intel / URL sharing / WHOIS / the three AI stages / YARA (upload your own rules), then watch a **live stage rail** — every pipeline stage lights up as it runs, with durations, skip reasons, and errors streamed straight from the audit log |
 | **Report** (`/report/{id}`) | The full evidence report in the browser: verdict banner, risk signals, header findings, YARA matches, IOCs, per-source threat intel, WHOIS ages, AI assessment, and the stage audit trail |
 | **History** (`/history`) | Every past analysis, filterable by verdict (malicious / suspicious / clean / errors / running) and searchable by filename |
 
@@ -378,20 +309,23 @@ rules reached different conclusions:
 
 
 
-> 🔒 **Security & privacy notes.** The console binds to `127.0.0.1` and has no
-> authentication or CSRF protection — it is a single-analyst workstation tool.
-> `--host` can bind it elsewhere, but only do so behind an authenticated
-> reverse proxy on a trusted network. There is also no cap on concurrent
-> analyses, so keep it off untrusted networks.
+> 🔒 **Security & privacy notes.** The console has no login; it is a
+> single-analyst workstation tool and listens on `127.0.0.1`. It only answers
+> requests addressed to `127.0.0.1`, `localhost` or `[::1]` (against DNS
+> rebinding), accepts uploads only from its own page (against CSRF), escapes
+> everything it displays and sends a strict Content-Security-Policy, and runs
+> at most `--max-parallel` analyses at once. To reach it from other machines,
+> put it behind a reverse proxy that requires login, start it with
+> `--host 0.0.0.0` and pass the proxy's name with `--allow-host`.
 >
 > Everything under `webui/data/` — uploaded emails, reports, and logs —
 > contains the content of the messages you analyze, including recipient
-> addresses and internal domains. It is gitignored; keep it that way, and
-> treat that folder with the same care as the mailbox it came from.
+> addresses and internal domains. The folder is created readable only by you
+> and is gitignored; treat it with the same care as the mailbox it came from.
 >
-> Note that the threat-intel stage sends extracted IOCs (domains, URLs,
-> hashes) to third-party services. Untick it for sensitive material, or run
-> the CLI with `--skip-intel`.
+> The threat-intel stage sends extracted IOCs (domains, URLs, hashes) to
+> third-party services. Untick it for sensitive material, or run the CLI with
+> `--skip-intel`.
 
 ---
 
@@ -531,7 +465,7 @@ it. Checks marked **partial** work but have a documented limitation.
 | SHA256 of every attachment | `ioc-extractor` | Computed locally, no upload required |
 | Hash reputation | `ioc-orchestrator` | VirusTotal and Hybrid Analysis |
 | Sandbox detonation | `hybrid-analysis`, `virustotal` | Opt-in via `--upload` only — uploaded files become community-visible |
-| URL sharing | `virustotal`, `urlscan` | Off by default: VirusTotal is only asked for an existing report and urlscan scans privately. `--share-urls` submits URLs to VT and makes urlscan scans public |
+| URL sharing | `virustotal`, `urlscan` | Off by default: VirusTotal is only asked for an existing report and urlscan scans privately. `--share-urls` submits URLs to VirusTotal and makes urlscan scans public |
 | Custom YARA rules across every layer | `email-yara-scanner` | Optional; raw bytes, headers, bodies and each attachment. A high-severity match adds +50 |
 
 ---
@@ -710,8 +644,8 @@ All keys are **optional** — sources without a key are skipped automatically an
 **Where to put them — a private config file outside the repository.**
 
 ```bash
-python3 phishhunter.py config set virustotal    # hidden prompt, saved immediately
-python3 phishhunter.py config show              # which keys are set (never values)
+python3 easy_install.py --keys     # asks for each key, hidden input
+python3 easy_install.py --check    # which keys are set (never values)
 ```
 
 The file lives in your user profile, **not** in the project folder, so it
@@ -724,7 +658,7 @@ clone:
 | Windows | `%APPDATA%\phishhunter\config.ini` |
 | Custom | `--config PATH` or `PHISHHUNTER_CONFIG=PATH` |
 
-You can also edit it by hand (`python3 phishhunter.py config path`):
+You can also edit it by hand (`python3 skills/email-triage-pipeline/scripts/phishhunter_config.py path` prints where it is):
 
 ```ini
 [intel]
@@ -742,12 +676,12 @@ anthropic       = ...
 | Protection | Behaviour |
 |---|---|
 | Private by construction | Created atomically with mode `600` in a `700` directory |
-| Refused when unsafe | Like OpenSSH: if other users can access the file, it is not yours, or its folder is writable by others, phishHunter **refuses to load it** and prints the fix (`python3 phishhunter.py config fix-perms`) |
-| Hidden input | `config set` uses a no-echo prompt; keys never land in shell history. Piping works too, for secret managers: `pass show vt \| python3 phishhunter.py config set virustotal` |
+| Refused when unsafe | Like OpenSSH: if other users can access the file, it is not yours, or its folder is writable by others, phishHunter **refuses to load it** and prints the fix (`python3 easy_install.py --fix-perms`) |
+| Hidden input | Keys are typed at a no-echo prompt and never land in shell history. For secret managers, one key can be piped in: `pass show vt \| python3 skills/email-triage-pipeline/scripts/phishhunter_config.py set virustotal` |
 | Never displayed | Only key **names** are printed or logged (`config_file` audit event); values never are |
 | Literal values | No `%` / `$` expansion, no command substitution |
 | Precedence | A variable already exported in the shell **wins** over the file (one-off overrides, CI secrets) |
-| Opt-out | `--no-config` on the launcher, pipeline and web UI |
+| Opt-out | `--no-config` on the pipeline and the web UI |
 
 The file is not encrypted on purpose: the decryption key would have to live
 on the same machine, which protects nothing against someone who can already
@@ -755,8 +689,8 @@ read your home directory, and a passphrase on every run defeats the purpose.
 File permissions plus full-disk encryption are the effective protection; an
 OS-keychain backend is a possible future option.
 
-`python3 phishhunter.py doctor` shows which keys are set and where each one
-came from (config file or shell).
+`python3 easy_install.py --check` shows which keys are set and where each one
+came from (key file or shell).
 
 > **Keys are not enough on their own — they must also *work*.** The intel stage is judged by what actually answered, not by whether the call ran. If every source query fails (invalid key, network down, rate limit) the stage is marked **`error`**, the report and PDF say *"No threat-intel source returned data — `unknown` means unchecked, not clean"*, and confidence drops to `medium`. If only some queries fail, the stage stays `ok` but is flagged **degraded** (`WARNING` in the audit log, "partial" badge in the UI). Sources skipped purely because their key is unset are a configuration choice and are listed at `INFO`, never as failures. Two cases are deliberately **not** counted as failures: (1) names that can never exist on the internet — `.example`, `.test`, `.invalid`, `.localhost`, `.local`, `.internal`, `example.com/net/org` (RFC 2606/6761) — are never sent to intel or WHOIS and are listed as *"not sent"* in the report; (2) a source answering HTTP 400/422 **with a message that names the indicator as invalid, reserved, unresolvable or blocked** (e.g. *"Invalid domain"*, urlscan *"DNS Error - Could not resolve domain"*) has refused that indicator, which is an answer about the IOC, not an outage — it is shown as *rejected*. A 400 caused by a malformed request (e.g. a parameter validation error) stays a real failure. Error texts show the API's own message, not raw JSON. All IOCs and sources are queried concurrently, and each source gets the stage `--timeout` minus 30 s, so one slow lookup (e.g. a URL scan that never finishes) is recorded as that source's failure instead of discarding every other result. Check which keys the run saw with `grep intel_keys audit.jsonl` (key *names* only, never values).
 
@@ -769,14 +703,7 @@ came from (config file or shell).
 | `HYBRID_ANALYSIS_API_KEY` | [Hybrid Analysis](https://www.hybrid-analysis.com/apikeys) | ✅ |
 | `ANTHROPIC_API_KEY` | [Anthropic](https://console.anthropic.com/) — only for `--ai` | – |
 
-> ⚠️ **Nothing leaves your control by default.** Attachments are only hashed
-> and URLs only looked up (VirusTotal) or scanned privately (urlscan).
-> Two flags change that, and both make data visible to other users of those
-> services: `--upload` sends attachment files to VirusTotal / Hybrid
-> Analysis sandboxes; `--share-urls` submits URLs to VirusTotal and makes
-> urlscan scans public. Phishing links often carry the victim's address or a
-> session token, and attackers monitor these services for scans of their
-> own links — so share only after checking what the URL contains.
+> ⚠️ **`--upload` and `--share-urls`:** `--upload` sends attachments to the VirusTotal / Hybrid Analysis sandboxes and `--share-urls` submits URLs to VirusTotal and makes urlscan scans public. Both make the data visible to other users of those services. Phishing links often carry the victim's address or a token, and attackers watch for scans of their own links. Without these flags attachments are only hashed and URLs only looked up or scanned privately.
 
 ---
 
@@ -906,7 +833,7 @@ API-compatible gateway (corporate proxy, LiteLLM, self-hosted relay).
 ```
 .
 ├── README.md
-├── phishhunter.py               # launcher: install · config · analyze · pdf · web · doctor · run
+├── easy_install.py              # one-step install + private API-key setup
 ├── requirements.txt
 ├── .gitignore
 ├── skills/                      # 13 Agent Skills (SKILL.md + scripts/)
@@ -914,7 +841,7 @@ API-compatible gateway (corporate proxy, LiteLLM, self-hosted relay).
 │   │   └── scripts/
 │   │       ├── triage_pipeline.py
 │   │       ├── report_to_pdf.py #   ← JSON report → professional PDF
-│   │       ├── phishhunter_config.py # private API-key config (launcher, pipeline, web UI)
+│   │       ├── phishhunter_config.py # private API-key file (read by pipeline and web UI)
 │   │       └── ioc_extractor.py #   (bundled fallback)
 │   ├── email-parser/
 │   ├── email-header-analyzer/
@@ -934,6 +861,7 @@ API-compatible gateway (corporate proxy, LiteLLM, self-hosted relay).
 │   └── check_duplicates.py      # guards the intentionally duplicated scripts
 └── examples/
     ├── sample_phishing.eml      # synthetic test phishing email
+    ├── sample_clean.eml         # synthetic clean email
     ├── sample_triage_report.json
     └── sample_triage_report.pdf # rendered PDF example
 ```

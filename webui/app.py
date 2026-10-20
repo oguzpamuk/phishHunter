@@ -38,9 +38,9 @@ RUNNING
       VT_API_KEY, ABUSEIPDB_API_KEY, OTX_API_KEY, URLSCAN_API_KEY,
       HYBRID_ANALYSIS_API_KEY, ANTHROPIC_API_KEY
     They are read at start-up from the private per-user config file
-    (python3 phishhunter.py config set virustotal ...); exported variables
+    (python3 easy_install.py --keys); exported variables
     win. --config PATH uses another file, --no-config disables it.
-    Easiest start:  python3 phishhunter.py web
+    Install and enter keys first with:  python3 easy_install.py
 
 ============================================================================
 SECURITY MODEL (local, single-user console - no login)
@@ -779,9 +779,7 @@ def main():
     # API keys: load the private config once; every analysis subprocess
     # inherits them. Shell variables win; only NAMES are printed. An unsafe
     # file is refused and the server does not start.
-    via = os.environ.get("PHISHHUNTER_CONFIG_LOADED_FROM")
-    cfg_line = (f"loaded by phishhunter.py ({via})" if via
-                else "not loaded (--no-config)")
+    cfg_line = "not loaded (--no-config)"
     if not args.no_config:
         sys.path.insert(0, os.path.dirname(PIPELINE))
         import phishhunter_config as phc  # shared, next to the pipeline
@@ -795,8 +793,7 @@ def main():
             sys.exit(2)
         cfg_line = (f"{cfg['path']} ({len(cfg['loaded'])} key(s) loaded)"
                     if cfg["found"] else
-                    "none (add keys: python3 phishhunter.py config set "
-                    "virustotal)")
+                    "none (add keys: python3 easy_install.py --keys)")
     keys = [k for k in ("VT_API_KEY", "ABUSEIPDB_API_KEY", "OTX_API_KEY",
                         "URLSCAN_API_KEY", "HYBRID_ANALYSIS_API_KEY",
                         "ANTHROPIC_API_KEY")

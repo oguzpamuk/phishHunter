@@ -47,7 +47,7 @@ API keys:
     OTX_API_KEY, URLSCAN_API_KEY, HYBRID_ANALYSIS_API_KEY, ANTHROPIC_API_KEY).
     They are also read from the private per-user config file
     (~/.config/phishhunter/config.ini; %APPDATA%\\phishhunter\\config.ini on
-    Windows) - fill it with:  python3 phishhunter.py config set virustotal
+    Windows) - fill it with:  python3 easy_install.py --keys
     Variables already exported always win. The file is refused when other
     users can read it. Only names are logged, never values.
     --config PATH         Use this config file instead.
@@ -2296,11 +2296,8 @@ def main(argv=None) -> int:
     # REFUSED - the run stops with the exact fix instead of silently going
     # on without keys.
     if args.no_config:
-        via = os.environ.get("PHISHHUNTER_CONFIG_LOADED_FROM")
-        if via:
-            log.info(f"API-key config handled by phishhunter.py: {via}",
-                     extra={"event": "config_file", "path": via,
-                            "loaded_by": "launcher"})
+        log.info("API-key file not read (--no-config)",
+                 extra={"event": "config_file", "found": False})
     else:
         cfg = phc.load(args.config)
         if cfg["error"]:

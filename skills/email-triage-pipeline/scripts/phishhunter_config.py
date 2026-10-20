@@ -5,8 +5,8 @@ phishhunter_config.py - secure per-user configuration file for API keys.
 Purpose:
     One private file holds every API key phishHunter can use, so nothing
     has to be exported in each terminal. Shared by:
-      * phishhunter.py      (launcher: install / config / analyze / web ...)
-      * triage_pipeline.py  (CLI works without the launcher)
+      * easy_install.py     (installation: creates the file, asks for keys)
+      * triage_pipeline.py  (loads the keys before running any stage)
       * webui/app.py        (console picks keys up at start-up)
     It is ONE module imported by path - not a duplicated copy.
 
@@ -51,7 +51,7 @@ Security properties:
     * Windows: per-user %APPDATA% is protected by the profile ACL; POSIX
       mode bits are not checked there.
 
-CLI (the launcher wraps these; output never contains values):
+CLI (easy_install.py covers the common cases; output never contains values):
     python3 phishhunter_config.py path            # print the file location
     python3 phishhunter_config.py init            # create the template
     python3 phishhunter_config.py set virustotal  # hidden prompt, saves it
@@ -187,7 +187,7 @@ def template_text():
         "#",
         "# Fill in only the keys you have; empty values are ignored and the",
         "# matching source is skipped. Easiest (hidden input, not saved in",
-        "# shell history):   python3 phishhunter.py config set virustotal",
+        "# shell history):   python3 easy_install.py --keys",
         "#",
         "# This file must stay private (mode 600). phishHunter refuses to",
         "# load it otherwise. Variables exported in your shell win over it.",
@@ -244,7 +244,7 @@ def read_values(path, check_permissions=True):
             raise ConfigError(
                 "refusing to load API keys: " + "; ".join(problems)
                 + f". Fix: chmod 700 {os.path.dirname(path)} && chmod 600 "
-                  f"{path}   (or: python3 phishhunter.py config fix-perms)",
+                  f"{path}   (or: python3 easy_install.py --fix-perms)",
                 exit_code=2)
     cp = configparser.ConfigParser(interpolation=None)
     try:
@@ -320,7 +320,7 @@ def set_value(path, name, value):
     problems = permission_problems(path)
     if problems:
         raise ConfigError("refusing to write: " + "; ".join(problems)
-                          + " (python3 phishhunter.py config fix-perms)", 2)
+                          + " (python3 easy_install.py --fix-perms)", 2)
     with open(path, "r", encoding="utf-8-sig") as fh:
         lines = fh.read().splitlines()
 
