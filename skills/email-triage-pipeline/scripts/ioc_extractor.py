@@ -292,9 +292,6 @@ def refang(text: str) -> str:
     Output: the same text with those notations replaced so the IOC regexes
             can match ('hxxp://a[.]b' -> 'http://a.b').
     """
-    replacements = [
-        (re.compile(r"h..ps?://", re.IGNORECASE), lambda m: "https://" if "s" in m.group(0).lower().split(":")[0][-1] else "http://"),
-    ]
     out = re.sub(r"hxxps://", "https://", text, flags=re.IGNORECASE)
     out = re.sub(r"hxxp://", "http://", out, flags=re.IGNORECASE)
     out = re.sub(r"fxp://", "ftp://", out, flags=re.IGNORECASE)

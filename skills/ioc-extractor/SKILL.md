@@ -31,11 +31,11 @@ it was found (`from`, `headers`, `body`, `html`, `subject`, `body_url`, ...).
 
 ```bash
 # From an email-parser JSON result (recommended pipeline usage)
-python3 scripts/parse_email.py mail.eml -o parsed.json          # email-parser skill
+python3 ../email-parser/scripts/parse_email.py mail.eml -o parsed.json          # email-parser skill
 python3 scripts/ioc_extractor.py --input parsed.json --pretty
 
 # Pipe parser output directly
-python3 scripts/parse_email.py mail.eml --compact | python3 scripts/ioc_extractor.py
+python3 ../email-parser/scripts/parse_email.py mail.eml --compact | python3 scripts/ioc_extractor.py
 
 # Raw text scanning
 python3 scripts/ioc_extractor.py --text "visit hxxp://evil[.]com now"

@@ -235,7 +235,10 @@ def extract_domain(url: str) -> str:
     host = re.sub(r"^https?://", "", url, flags=re.IGNORECASE)
     host = host.split("/")[0].split("?")[0].split("#")[0]
     host = host.split(":")[0]          # drop :port if present
-    return host.lower().lstrip("www.") if host.startswith("www.") else host.lower()
+    host = host.lower()
+    # Remove exactly one leading "www." - str.lstrip("www.") would strip ANY
+    # leading "w"/"." characters ("www.wellsfargo.com" -> "ellsfargo.com").
+    return host[4:] if host.startswith("www.") else host
 
 
 def domain_matches(domain: str, legit_suffixes: tuple) -> bool:

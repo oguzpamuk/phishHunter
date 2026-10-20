@@ -16,6 +16,12 @@ parallel, and merges everything into one JSON report with an overall verdict.
 | Hash | VirusTotal, AlienVault OTX, Hybrid Analysis, urlscan.io (search) |
 | Local file | SHA256 computed locally, then queried as hash (or uploaded with `--upload`) |
 
+**Privacy defaults:** URLs are only *looked up* on VirusTotal (existing
+report, nothing submitted) and urlscan scans them *privately*. Pass
+`--share-urls` to submit URLs to VirusTotal and run public urlscan scans -
+only when the user agrees, since phishing URLs often contain the victim's
+address or a session token and attackers watch for scans of their links.
+
 Sources whose API key environment variable is missing are automatically
 skipped and listed under `"skipped"` — the orchestrator never fails just
 because one key is absent. Sources that were queried but failed (invalid

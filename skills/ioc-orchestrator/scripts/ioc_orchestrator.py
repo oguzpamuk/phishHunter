@@ -39,6 +39,10 @@ Options:
     --upload             For local files: upload to VT + Hybrid Analysis
                          sandboxes instead of only hash lookups.
                          WARNING: uploads are shared with those communities.
+    --share-urls         Share URLs with the communities: submit them to
+                         VirusTotal (POST) and make urlscan scans public.
+                         Default (privacy): VT only reads an existing
+                         report, urlscan scans privately.
     --raw                Keep each source's full JSON output in the report
                          (default keeps the condensed summaries only).
     --scripts-dir PATH   Directory containing the five source scripts.
@@ -394,6 +398,14 @@ def submit_ioc(ioc: str, args, scripts_dir: str, executor):
             result["errors"][name] = f"script not found: {script_path}"
             continue
         cli_args = [a.replace("{ioc}", effective_ioc) for a in template]
+        # Privacy: by default URLs are only LOOKED UP on VirusTotal and
+        # scanned PRIVATELY on urlscan (the tools' own defaults). Only
+        # --share-urls submits them to VT and makes urlscan scans public.
+        if effective_type == "url" and getattr(args, "share_urls", False):
+            if name == "virustotal":
+                cli_args.append("--submit")
+            elif name == "urlscan":
+                cli_args += ["--visibility", "public"]
         if args.raw:
             # Forward --raw so each tool emits its full raw API JSON
             # instead of the condensed summary.
@@ -495,6 +507,11 @@ def main():
                              "(shared with their communities!)")
     parser.add_argument("--raw", action="store_true",
                         help="Include full per-source JSON in the report")
+    parser.add_argument("--share-urls", action="store_true",
+                        help="SUBMIT URLs to VirusTotal and run PUBLIC "
+                             "urlscan scans. Default: VT report lookup only "
+                             "+ private urlscan scans (nothing shared). URLs "
+                             "in phishing mail often identify the victim.")
     parser.add_argument("--scripts-dir",
                         default=os.path.dirname(os.path.abspath(__file__)),
                         help="Directory containing the five tool scripts")

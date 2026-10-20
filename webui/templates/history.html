@@ -53,6 +53,11 @@
 </div>
 
 <script>
+/* HTML-escape every value that comes from the API before it reaches
+   innerHTML: stage errors, file names and AI output can carry text an
+   attacker controls (e.g. through prompt injection). */
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 /* History controller: keeps the verdict segment + search box in sync with
    /api/analyses (server-side filtering), debounces typing, and links each
    row to its report (or live progress when still running). */
@@ -64,7 +69,7 @@ const fmtTime = iso => new Date(iso).toLocaleString(undefined,
 const badge = row => {
   if (row.status === "running") return '<span class="badge running">running</span>';
   if (row.status === "error")   return '<span class="badge error">error</span>';
-  return `<span class="badge ${row.verdict}">${row.verdict||"?"}</span>`;
+  return `<span class="badge ${esc(row.verdict)}">${esc(row.verdict||"?")}</span>`;
 };
 
 async function load() {
@@ -87,15 +92,15 @@ async function load() {
     // The AI column carries the disagreement marker: scanning this list,
     // an analyst should be able to spot the rows the rules got wrong.
     const aiCell = row.ai_verdict
-      ? `<span class="badge ${row.ai_verdict}">${row.ai_verdict}</span>` +
+      ? `<span class="badge ${esc(row.ai_verdict)}">${esc(row.ai_verdict)}</span>` +
         (row.ai_confidence != null
-          ? ` <span class="mono" style="color:var(--muted)">${row.ai_confidence}</span>` : "") +
+          ? ` <span class="mono" style="color:var(--muted)">${esc(row.ai_confidence)}</span>` : "") +
         (row.ai_agrees === 0
           ? ` <span style="color:var(--suspicious)" title="AI reached a different conclusion">&#9888;</span>` : "")
       : `<span style="color:var(--faint)">–</span>`;
-    tr.innerHTML = `<td class="mono">${row.filename}</td>
+    tr.innerHTML = `<td class="mono">${esc(row.filename)}</td>
       <td>${badge(row)}</td>
-      <td class="score">${row.score ?? "–"}</td>
+      <td class="score">${esc(row.score ?? "–")}</td>
       <td>${aiCell}</td>
       <td style="color:var(--muted)">${fmtTime(row.created_utc)}</td>`;
     tr.onclick = () => location.href =

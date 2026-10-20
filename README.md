@@ -118,6 +118,35 @@ Each skill folder follows the standard Agent Skill layout — a `SKILL.md` (YAML
 
 ## 🚀 Quick start
 
+### One engine, several ways in
+
+Every analysis is done by **one script**:
+`skills/email-triage-pipeline/scripts/triage_pipeline.py`. Everything else is
+a different way of calling it — pick whichever suits you, the result is the
+same report.
+
+| Way in | Who it is for | What it adds on top of the pipeline |
+|---|---|---|
+| `python3 phishhunter.py analyze …` (launcher) | Everyday use | Picks the Python environment, loads your API keys, adds `--skills-root` — then runs `triage_pipeline.py` with your options unchanged |
+| `python3 skills/email-triage-pipeline/scripts/triage_pipeline.py …` | Scripting, CI, reference | Nothing — this **is** the engine; all options are documented below |
+| `python3 webui/app.py` (or `phishhunter.py web`) | Point-and-click analysts | Runs `triage_pipeline.py` for every upload and shows the result |
+| Claude.ai / Claude Code skills | Conversational triage | Claude runs `triage_pipeline.py` and acts as the final analyst |
+
+The two command lines are interchangeable:
+
+```bash
+python3 phishhunter.py analyze mail.eml --format text
+# is exactly
+python3 skills/email-triage-pipeline/scripts/triage_pipeline.py mail.eml --skills-root skills --format text
+```
+
+The reference sections further down (exit codes, logging, YARA, AI stages)
+show the direct `triage_pipeline.py` form because it works everywhere;
+replace that prefix with `python3 phishhunter.py analyze` (and drop
+`--skills-root skills`) if you prefer the launcher. `phishhunter.py pdf …`
+and `phishhunter.py web …` likewise call `report_to_pdf.py` and
+`webui/app.py` with your arguments.
+
 ### Easy installation (recommended)
 
 No virtual environment needed — `install` uses the Python you already have:
@@ -179,19 +208,18 @@ back to your normal Python. Without `--venv` the launcher **never** creates
 a virtual environment. If `python3-venv` is missing, a pip-less venv filled
 by your system pip is used instead.
 
-You can of course skip the launcher entirely — `pip install -r
-requirements.txt` and run the scripts directly (Option A below); the keys
-in the config file are still picked up.
+You can of course skip the launcher entirely — Option A below uses only the
+scripts; the keys in the config file are still picked up.
 
-### Option A — Standalone CLI (no Claude required)
+### Option A — Direct CLI (no launcher, no Claude)
 
 ```bash
 git clone https://github.com/oguzpamuk/phishHunter.git
 cd phishHunter
-pip install -r requirements.txt          # only `requests`, for the intel stage
+pip install -r requirements.txt          # optional: requests (threat intel) + reportlab (PDF)
 
 # API keys: store them once in the private config (read automatically) ...
-python3 phishhunter.py config set virustotal
+python3 skills/email-triage-pipeline/scripts/phishhunter_config.py set virustotal
 # ...or export them per shell (exported values win over the config file):
 export VT_API_KEY="..."
 export ABUSEIPDB_API_KEY="..."
@@ -241,10 +269,27 @@ Install each skill folder as an Agent Skill (upload the folder or a packaged `.s
 
 Claude runs the whole pipeline and acts as the final AI analyst layer — reasoning over the collected evidence, agreeing or disagreeing with the heuristic verdict, and recommending actions.
 
+Claude runs the same `triage_pipeline.py` (the launcher is not needed). Where
+the keys come from depends on where the scripts run:
+
+- **Claude Code** runs the scripts on your machine, so your private config
+  file (`phishhunter.py config set …`) and exported variables are used as
+  usual.
+- **Claude.ai** runs the scripts in Claude's own sandbox, which cannot see
+  the config file on your computer and may have no internet access. The
+  offline stages (parsing, headers, body, IOCs, YARA, verdict) work there;
+  threat-intel lookups and WHOIS need network access and keys available in
+  that environment.
+
+Install the skill folders together: the pipeline calls its sibling skills,
+and its `scripts/` folder must keep `phishhunter_config.py` next to
+`triage_pipeline.py`.
+
 ### Option C — Web UI (local analyst console)
 
 A zero-dependency web console built entirely on the Python standard library —
-no Flask, no npm, nothing to install.
+no Flask, no npm, nothing to install. Every upload is analysed by the same
+`triage_pipeline.py`, so console and CLI reports are identical.
 
 ```bash
 git clone https://github.com/oguzpamuk/phishHunter.git
@@ -267,6 +312,8 @@ Useful flags:
 ```bash
 python3 webui/app.py --port 9000          # use a port other than the default 8787
 python3 webui/app.py --skills-root /path/to/skills   # non-standard skill location
+python3 webui/app.py --max-parallel 4     # concurrent analyses (default 2)
+python3 webui/app.py --stage-timeout 300 --analysis-timeout 3600   # defaults
 ```
 
 The server prints its URL, the skills root it resolved, and its data directory
@@ -274,10 +321,25 @@ on startup. Stop it with `Ctrl-C`. Everything it writes — uploads, JSON
 reports, audit logs, and the SQLite index — lives under `webui/data/`; delete
 that folder to reset the console to a clean state.
 
+**Security model.** The console is a single-user tool with no login, so it
+protects itself in other ways:
+
+| Threat | Protection |
+|---|---|
+| A web page reading your reports through DNS rebinding | Only requests addressed to `127.0.0.1` / `localhost` / `[::1]` (plus `--allow-host` names) are answered |
+| A web page starting analyses (CSRF) and spending your API quota | Uploads need a custom request header and a matching `Origin`, which another site cannot send |
+| Script injection through email content or AI output | Every value is HTML-escaped, and a strict Content-Security-Policy with a per-page nonce blocks any injected script |
+| Other accounts on the machine reading analysed mail | `webui/data/` is private (folders `700`, files `600`) |
+| Resource exhaustion | At most `--max-parallel` analyses run at once (HTTP 429 otherwise) |
+
+Keep it on `127.0.0.1` (the default). To share it, bind with `--host 0.0.0.0`
+only behind an **authenticated** reverse proxy and pass the proxy's host name
+with `--allow-host triage.example.org`.
+
 | Page | What it does |
 |---|---|
 | **Dashboard** (`/`) | Verdict distribution spectrum, totals, live "running" counter, recent analyses |
-| **New analysis** (`/analyze`) | Drag-&-drop an `.eml`/`.msg`, toggle intel / WHOIS / AI / YARA (upload your own rules), then watch a **live stage rail** — every pipeline stage lights up as it runs, with durations, skip reasons, and errors streamed straight from the audit log |
+| **New analysis** (`/analyze`) | Drag-&-drop an `.eml`/`.msg`, toggle intel / URL sharing / WHOIS / the three AI stages (body, images, analyst) / YARA (upload your own rules), then watch a **live stage rail** — every pipeline stage lights up as it runs, with durations, skip reasons, and errors streamed straight from the audit log |
 | **Report** (`/report/{id}`) | The full evidence report in the browser: verdict banner, risk signals, header findings, YARA matches, IOCs, per-source threat intel, WHOIS ages, AI assessment, and the stage audit trail |
 | **History** (`/history`) | Every past analysis, filterable by verdict (malicious / suspicious / clean / errors / running) and searchable by filename |
 
@@ -469,6 +531,7 @@ it. Checks marked **partial** work but have a documented limitation.
 | SHA256 of every attachment | `ioc-extractor` | Computed locally, no upload required |
 | Hash reputation | `ioc-orchestrator` | VirusTotal and Hybrid Analysis |
 | Sandbox detonation | `hybrid-analysis`, `virustotal` | Opt-in via `--upload` only — uploaded files become community-visible |
+| URL sharing | `virustotal`, `urlscan` | Off by default: VirusTotal is only asked for an existing report and urlscan scans privately. `--share-urls` submits URLs to VT and makes urlscan scans public |
 | Custom YARA rules across every layer | `email-yara-scanner` | Optional; raw bytes, headers, bodies and each attachment. A high-severity match adds +50 |
 
 ---
@@ -706,7 +769,14 @@ came from (config file or shell).
 | `HYBRID_ANALYSIS_API_KEY` | [Hybrid Analysis](https://www.hybrid-analysis.com/apikeys) | ✅ |
 | `ANTHROPIC_API_KEY` | [Anthropic](https://console.anthropic.com/) — only for `--ai` | – |
 
-> ⚠️ **`--upload` warning:** uploading attachments to VirusTotal / Hybrid Analysis makes them visible to those communities. Never upload files containing sensitive data.
+> ⚠️ **Nothing leaves your control by default.** Attachments are only hashed
+> and URLs only looked up (VirusTotal) or scanned privately (urlscan).
+> Two flags change that, and both make data visible to other users of those
+> services: `--upload` sends attachment files to VirusTotal / Hybrid
+> Analysis sandboxes; `--share-urls` submits URLs to VirusTotal and makes
+> urlscan scans public. Phishing links often carry the victim's address or a
+> session token, and attackers monitor these services for scans of their
+> own links — so share only after checking what the URL contains.
 
 ---
 
@@ -864,7 +934,6 @@ API-compatible gateway (corporate proxy, LiteLLM, self-hosted relay).
 │   └── check_duplicates.py      # guards the intentionally duplicated scripts
 └── examples/
     ├── sample_phishing.eml      # synthetic test phishing email
-    ├── sample_clean.eml         # synthetic clean email
     ├── sample_triage_report.json
     └── sample_triage_report.pdf # rendered PDF example
 ```

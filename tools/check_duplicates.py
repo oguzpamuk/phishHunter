@@ -131,7 +131,6 @@ def main(argv=None) -> int:
         drifted += 1
         print(f"DRIFT {name:<24} {len(paths)} copies differ:")
         for p in paths:
-            mtime = os.path.getmtime(os.path.join(args.root, p))
             print(f"        {hashes[p][:8]}  {p}")
         if args.fix:
             # Newest wins — the assumption is that the most recent edit is

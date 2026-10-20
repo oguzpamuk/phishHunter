@@ -29,8 +29,11 @@ python scripts/vt_lookup.py ip 8.8.8.8
 # 2) Domain reputation
 python scripts/vt_lookup.py domain example.com
 
-# 3) URL analysis (submits URL, then fetches the report)
+# 3) URL lookup - reads the EXISTING report only, nothing is shared (default)
 python scripts/vt_lookup.py url "http://suspicious.example/login"
+#    Submit it for a fresh analysis - visible to other VT users, so only when
+#    the URL carries no victim address / token and the user agrees:
+python scripts/vt_lookup.py url "http://suspicious.example/login" --submit
 
 # 4) File hash lookup (MD5, SHA1, or SHA256)
 python scripts/vt_lookup.py hash 44d88612fea8a8f36de82e1278abb02f
@@ -40,7 +43,8 @@ python scripts/vt_lookup.py upload /path/to/attachment.docx
 
 # Options:
 #   --raw       Print full raw API JSON instead of the summarized verdict
-#   --no-wait   (upload/url only) Do not poll for the analysis result, just return the analysis ID
+#   --submit    (url only) Submit the URL for analysis (shared with the VT community)
+#   --no-wait   (upload, url --submit) Do not poll for the analysis result, just return the analysis ID
 ```
 
 ## Output

@@ -13,7 +13,10 @@ Authentication:
 
 Subcommands / Inputs:
     scan <url>               Full URL to scan (include http:// or https://).
-        --visibility V       "public" (default), "unlisted", or "private".
+        --visibility V       "private" (default), "unlisted", or "public".
+                             Only private keeps the scan (and any victim
+                             address/token inside the URL) out of other
+                             users' view.
                              Use private/unlisted if the URL might contain
                              tokens or personal data.
         --no-wait            Return scan UUID immediately; don't poll.
@@ -189,9 +192,13 @@ def main():
                                  "search-hash", "result"],
                         help="Operation to perform")
     parser.add_argument("indicator", help="URL, domain, IP, hash, or scan UUID")
-    parser.add_argument("--visibility", default="public",
+    parser.add_argument("--visibility", default="private",
                         choices=["public", "unlisted", "private"],
-                        help="Scan visibility (default public)")
+                        help="Scan visibility (default private). public/"
+                             "unlisted scans are visible to other urlscan "
+                             "users - URLs from phishing mail often carry "
+                             "the victim's address or a token, and attackers "
+                             "watch for scans of their own links.")
     parser.add_argument("--no-wait", action="store_true",
                         help="scan: return UUID without polling for result")
     parser.add_argument("--limit", type=int, default=10,

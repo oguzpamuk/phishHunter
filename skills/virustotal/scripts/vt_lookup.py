@@ -15,12 +15,16 @@ Subcommands / Inputs:
     ip <ip_address>        IPv4/IPv6 address, e.g. 8.8.8.8
     domain <domain>        Domain name, e.g. example.com
     url <url>              Full URL, e.g. http://evil.example/login
+                           Default: read the EXISTING report only (nothing is
+                           shared). Add --submit to send it for analysis -
+                           submissions are visible to other VT users.
     hash <file_hash>       MD5 (32 hex), SHA1 (40 hex) or SHA256 (64 hex)
     upload <file_path>     Local file path (email attachment, sample, etc.)
 
 Global options:
     --raw                  Print the full raw API JSON response instead of
                            the condensed verdict summary.
+    --submit               For 'url': submit the URL (see privacy note).
     --no-wait              For 'url' and 'upload': return the analysis ID
                            immediately instead of polling for completion.
 
@@ -211,18 +215,31 @@ def cmd_hash(args):
 
 def cmd_url(args):
     """
-    Input:  args.indicator (full URL), args.no_wait flag.
-    Output: (summary, raw). Submits the URL for analysis, then (unless
-            --no-wait) polls and finally fetches the /urls/<id> report.
+    Input:  args.indicator (full URL), args.submit, args.no_wait flags.
+    Output: (summary, raw).
+    Privacy: by DEFAULT this only READS the existing VirusTotal report for
+            the URL (GET /urls/<id>) - nothing is shared. URLs in phishing
+            mail often carry the victim's address or a session token, and a
+            submission is visible to other VirusTotal users (and can tip off
+            the attacker). Only with --submit is the URL sent for a fresh
+            analysis (POST /urls), polled (unless --no-wait), then read.
+            A URL VirusTotal has never seen returns verdict "unknown".
     """
+    # VT identifies URL reports by url-safe base64(url) without padding.
+    url_id = base64.urlsafe_b64encode(args.indicator.encode()).decode().rstrip("=")
+    if not args.submit:
+        raw = vt_request("GET", f"/urls/{url_id}")
+        summary = summarize_object(args.indicator, "url", raw, f"url/{url_id}")
+        if raw.get("_not_found"):
+            summary["note"] = ("URL not known to VirusTotal; not submitted "
+                               "(privacy default - use --submit to share it)")
+        return summary, raw
     submit = vt_request("POST", "/urls", data={"url": args.indicator})
     analysis_id = submit.get("data", {}).get("id", "")
     if args.no_wait:
         return {"indicator": args.indicator, "type": "url",
                 "analysis_id": analysis_id, "status": "queued"}, submit
     wait_for_analysis(analysis_id)
-    # VT identifies URL reports by url-safe base64(url) without padding.
-    url_id = base64.urlsafe_b64encode(args.indicator.encode()).decode().rstrip("=")
     raw = vt_request("GET", f"/urls/{url_id}")
     return summarize_object(args.indicator, "url", raw, f"url/{url_id}"), raw
 
@@ -281,6 +298,10 @@ def main():
                         help="Print full raw API JSON instead of the summary")
     parser.add_argument("--no-wait", action="store_true",
                         help="url/upload: do not poll, return analysis ID only")
+    parser.add_argument("--submit", action="store_true",
+                        help="url: SUBMIT the URL for a new analysis "
+                             "(shared with the VirusTotal community). "
+                             "Default: only read the existing report.")
     args = parser.parse_args()
 
     handlers = {"ip": cmd_ip, "domain": cmd_domain, "url": cmd_url,

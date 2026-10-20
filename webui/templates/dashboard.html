@@ -71,6 +71,11 @@
 </div>
 
 <script>
+/* HTML-escape every value that comes from the API before it reaches
+   innerHTML: stage errors, file names and AI output can carry text an
+   attacker controls (e.g. through prompt injection). */
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 /* Dashboard controller: pulls /api/stats, fills tiles + spectrum + recent
    table, and auto-refreshes every 5s so live runs update the counters. */
 const fmtTime = iso => {
@@ -81,7 +86,7 @@ const fmtTime = iso => {
 const badge = row => {
   if (row.status === "running") return '<span class="badge running">running</span>';
   if (row.status === "error")   return '<span class="badge error">error</span>';
-  return `<span class="badge ${row.verdict}">${row.verdict||"?"}</span>`;
+  return `<span class="badge ${esc(row.verdict)}">${esc(row.verdict||"?")}</span>`;
 };
 
 async function refresh() {
@@ -118,12 +123,12 @@ async function refresh() {
     const tr = document.createElement("tr");
     tr.className = "row";
     const aiCell = row.ai_verdict
-      ? `<span class="badge ${row.ai_verdict}">${row.ai_verdict}</span>` +
+      ? `<span class="badge ${esc(row.ai_verdict)}">${esc(row.ai_verdict)}</span>` +
         (row.ai_agrees === 0 ? ` <span style="color:var(--suspicious)">&#9888;</span>` : "")
       : `<span style="color:var(--faint)">–</span>`;
-    tr.innerHTML = `<td class="mono">${row.filename}</td>
+    tr.innerHTML = `<td class="mono">${esc(row.filename)}</td>
                     <td>${badge(row)}</td>
-                    <td class="score">${row.score ?? "–"}</td>
+                    <td class="score">${esc(row.score ?? "–")}</td>
                     <td>${aiCell}</td>
                     <td style="color:var(--muted)">${fmtTime(row.created_utc)}</td>`;
     tr.onclick = () => location.href =

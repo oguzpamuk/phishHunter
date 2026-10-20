@@ -251,12 +251,12 @@ def read_values(path, check_permissions=True):
         with open(path, "r", encoding="utf-8-sig") as fh:
             cp.read_file(fh)
     except (OSError, UnicodeDecodeError) as exc:
-        raise ConfigError(f"cannot read {path}: {exc.__class__.__name__}")
+        raise ConfigError(f"cannot read {path}: {exc.__class__.__name__}") from None
     except configparser.Error as exc:
         # The parser message can echo a line; keep only its type + line no.
         line = getattr(exc, "lineno", None)
         raise ConfigError(f"{path} is malformed ({exc.__class__.__name__}"
-                          + (f" near line {line}" if line else "") + ")")
+                          + (f" near line {line}" if line else "") + ")") from None
     out = {}
     for sec, opt, env, _ in KEY_MAP:
         if cp.has_option(sec, opt):

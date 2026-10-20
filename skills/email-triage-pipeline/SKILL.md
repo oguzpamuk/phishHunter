@@ -58,6 +58,12 @@ python3 scripts/triage_pipeline.py mail.eml --skip-intel --skip-whois --format t
 # ALWAYS confirm with the user first, uploads are community-visible!)
 python3 scripts/triage_pipeline.py mail.eml --sources vt,otx --upload
 
+# By default URLs are only LOOKED UP on VirusTotal and scanned PRIVATELY on
+# urlscan. --share-urls submits them to VT and makes urlscan scans public -
+# ALWAYS confirm with the user first: phishing URLs often contain the
+# victim's address or a token, and attackers watch for scans of their links.
+python3 scripts/triage_pipeline.py mail.eml --share-urls
+
 # Add the LLM analyst assessment on top of the heuristic verdict
 export ANTHROPIC_API_KEY=...
 python3 scripts/triage_pipeline.py mail.eml --ai -o report.json --pretty
@@ -203,7 +209,7 @@ directly usable in shell automation and mail-gateway hooks.
 
 1. Locate the uploaded email under `/mnt/user-data/uploads/`.
 2. Check which intel API keys are available; tell the user which sources will
-   be skipped. Never use `--upload` without explicit user consent.
+   be skipped. Never use `--upload` or `--share-urls` without explicit user consent.
 3. Run: `python3 scripts/triage_pipeline.py <file> -o /home/claude/report.json --pretty`
    (progress is streamed on stderr).
 4. Read the report and present it as an analyst would:

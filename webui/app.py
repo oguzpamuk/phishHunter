@@ -29,6 +29,8 @@ RUNNING
     python3 webui/app.py [--host 127.0.0.1] [--port 8787]
                          [--skills-root skills]
                          [--config PATH | --no-config]
+                         [--allow-host NAME[:PORT] ...] [--max-parallel 2]
+                         [--stage-timeout 300] [--analysis-timeout 3600]
 
     Then open  http://127.0.0.1:8787
 
@@ -41,6 +43,20 @@ RUNNING
     Easiest start:  python3 phishhunter.py web
 
 ============================================================================
+SECURITY MODEL (local, single-user console - no login)
+============================================================================
+    * Host header allow-list: only loopback names (and --allow-host values)
+      are answered, so a web page cannot use DNS rebinding to read reports.
+    * CSRF: POST requires the X-PhishHunter-Request header and a matching
+      Origin, which a cross-site page cannot send without CORS approval.
+    * Every page gets a strict Content-Security-Policy with a per-response
+      script nonce; API values are HTML-escaped before rendering.
+    * webui/data is private (umask 077, dirs 700, files 600).
+    * At most --max-parallel analyses run at once (HTTP 429 otherwise).
+    Binding beyond loopback (--host 0.0.0.0) has NO authentication: put an
+    authenticated reverse proxy in front and pass its name with --allow-host.
+
+============================================================================
 HTTP API (all JSON unless noted)
 ============================================================================
     GET  /                      dashboard page          (text/html)
@@ -49,13 +65,21 @@ HTTP API (all JSON unless noted)
     GET  /report/{id}           report page             (text/html)
     GET  /static/<file>         css/js assets
 
-    POST /api/analyze           multipart form upload; fields:
+    POST /api/analyze           multipart form upload; REQUIRED header
+                                "X-PhishHunter-Request: 1" (CSRF guard).
+                                fields:
                                   email      (file, .eml/.msg, required)
                                   skip_intel ("1" to skip threat intel)
                                   skip_whois ("1" to skip WHOIS)
+                                  share_urls ("1": submit URLs to VT and make
+                                              urlscan scans public)
                                   yara_rules (file, .yar/.yara, optional)
+                                  ai_body    ("1": AI body analysis)
+                                  ai_images  ("1": AI image analysis)
                                   ai         ("1" to add the LLM analyst)
                                 → {"id": "<analysis id>"}
+                                  400 bad input · 403 cross-site / wrong
+                                  Host · 429 too many running analyses
     GET  /api/analysis/{id}/progress
                                 → {"status": "running|done|error",
                                    "stages": [ {stage,status,duration_s,
@@ -82,11 +106,11 @@ SECURITY NOTES
 
 import argparse
 import datetime as dt
-import io
 import json
 import mimetypes
 import os
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -126,6 +150,27 @@ STAGE_LABELS = {
 
 SKILLS_ROOT = os.path.join(REPO_ROOT, "skills")   # overridable via CLI
 
+# ---------------------------------------------------------------------------
+# Security settings (filled in by main()).
+#   ALLOWED_HOSTS  - exact "host:port" values accepted in the Host header.
+#                    Anything else is refused: this defeats DNS-rebinding
+#                    attacks where a malicious web page re-points its own
+#                    domain at 127.0.0.1 to read reports from this console.
+#   CSRF_HEADER    - POSTs must carry this header. Browsers cannot add a
+#                    custom header to a cross-site request without a CORS
+#                    preflight, which this server never approves, so a
+#                    malicious page cannot start analyses (and spend your API
+#                    quota) in the background.
+#   MAX_PARALLEL   - concurrent analyses; extra uploads get HTTP 429.
+# ---------------------------------------------------------------------------
+ALLOWED_HOSTS = set()
+CSRF_HEADER = "X-PhishHunter-Request"
+MAX_PARALLEL = 2
+STAGE_TIMEOUT = 300          # seconds per pipeline stage (--timeout)
+ANALYSIS_TIMEOUT = 3600      # hard limit for one whole analysis
+_slots = threading.BoundedSemaphore(MAX_PARALLEL)
+MAX_UPLOAD = 50 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Database — one table indexing every analysis for dashboard + history.
@@ -137,10 +182,30 @@ def db():
     return conn
 
 
+def secure_data_dir():
+    """Make everything under webui/data private to the current user.
+
+    Uploaded emails, reports, audit logs and the index contain recipient
+    addresses and message content, so they must not be readable by other
+    accounts on the machine. New files are already created private (main()
+    sets umask 077); this also repairs folders created by older versions.
+    POSIX only - on Windows the per-user profile ACLs apply.
+    """
+    if os.name != "posix":
+        return
+    for root, _dirs, files in os.walk(DATA_DIR):
+        os.chmod(root, 0o700)
+        for name in files:
+            try:
+                os.chmod(os.path.join(root, name), 0o600)
+            except OSError:
+                pass
+
+
 def init_db():
-    """Create data dirs and the analyses table on first run."""
+    """Create private data dirs and the analyses table on first run."""
     for d in (DATA_DIR, UPLOAD_DIR, REPORT_DIR, LOG_DIR):
-        os.makedirs(d, exist_ok=True)
+        os.makedirs(d, mode=0o700, exist_ok=True)
     with db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS analyses (
@@ -164,6 +229,12 @@ def init_db():
                          ("ai_agrees", "INTEGER")):
             if col not in have:
                 conn.execute(f"ALTER TABLE analyses ADD COLUMN {col} {ddl}")
+        # Runs that were still "running" when the server stopped can never
+        # finish; mark them so they do not stay "running" forever.
+        conn.execute("UPDATE analyses SET status='error', error=? "
+                     "WHERE status='running'",
+                     ("interrupted: the web UI was stopped during the run",))
+    secure_data_dir()
 
 
 def sanitize_filename(name):
@@ -186,7 +257,9 @@ def run_analysis(analysis_id, email_path, options):
     Input : analysis_id — UUID hex string, primary key in the DB
             email_path  — absolute path to the stored upload
             options     — {"skip_intel": bool, "skip_whois": bool,
-                           "yara_rules": path|None, "ai": bool}
+                           "yara_rules": path|None, "ai": bool,
+                           "ai_body": bool, "ai_images": bool,
+                           "share_urls": bool}
     Effect: writes the JSON report to REPORT_DIR/<id>.json, streams the
             audit log to LOG_DIR/<id>.log (consumed live by the progress
             API), and updates the DB row to done/error with the verdict.
@@ -197,6 +270,7 @@ def run_analysis(analysis_id, email_path, options):
            "--skills-root", SKILLS_ROOT,
            "-o", report_path,
            "--log-file", log_path, "--quiet",
+           "--timeout", str(STAGE_TIMEOUT),
            # The server loaded the key config once at start-up and the child
            # inherits os.environ; stop the pipeline re-reading it so the
            # server's --config / --no-config choice holds.
@@ -207,13 +281,19 @@ def run_analysis(analysis_id, email_path, options):
         cmd.append("--skip-whois")
     if options.get("yara_rules"):
         cmd += ["--yara-rules", options["yara_rules"]]
+    if options.get("share_urls"):
+        cmd.append("--share-urls")
+    if options.get("ai_body"):
+        cmd.append("--ai-body")
+    if options.get("ai_images"):
+        cmd.append("--ai-images")
     if options.get("ai"):
         cmd.append("--ai")
 
     try:
         # Exit codes 0/1/2 are verdicts, 3 is fatal — all non-exceptional.
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=1800)
+                              timeout=ANALYSIS_TIMEOUT)
         if os.path.isfile(report_path):
             with open(report_path, "r", encoding="utf-8") as f:
                 report = json.load(f)
@@ -235,11 +315,19 @@ def run_analysis(analysis_id, email_path, options):
                     "UPDATE analyses SET status='error', error=? WHERE id=?",
                     ((proc.stderr or "pipeline produced no report")[:500],
                      analysis_id))
+    except subprocess.TimeoutExpired:
+        with db() as conn:
+            conn.execute(
+                "UPDATE analyses SET status='error', error=? WHERE id=?",
+                (f"analysis exceeded {ANALYSIS_TIMEOUT}s and was stopped",
+                 analysis_id))
     except Exception as e:
         with db() as conn:
             conn.execute(
                 "UPDATE analyses SET status='error', error=? WHERE id=?",
                 (str(e)[:500], analysis_id))
+    finally:
+        _slots.release()
 
 
 def read_progress(analysis_id):
@@ -339,14 +427,43 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "phishHunter/1.0"
 
     # ---- small response helpers ----------------------------------------
-    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+    def _send(self, code, body, ctype="application/json; charset=utf-8",
+              csp=None):
+        """Write a response with the console's security headers.
+
+        Input : code, body (str|bytes), ctype, csp (page-specific policy;
+                default denies everything - right for JSON/static files).
+        """
         data = body if isinstance(body, bytes) else body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy",
+                         csp or "default-src 'none'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(data)
+
+    def _host_allowed(self):
+        """Input: request headers. Output: True when Host is one of ours."""
+        host = (self.headers.get("Host") or "").strip().lower()
+        return host in ALLOWED_HOSTS
+
+    def _same_origin_post(self):
+        """CSRF check for POST: custom header present, Origin (if sent)
+        names this console."""
+        if self.headers.get(CSRF_HEADER) != "1":
+            return False
+        origin = self.headers.get("Origin")
+        if origin:
+            o = urlparse(origin)
+            if o.scheme not in ("http", "https") or \
+                    (o.netloc or "").lower() not in ALLOWED_HOSTS:
+                return False
+        return True
 
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, ensure_ascii=False, default=str))
@@ -356,8 +473,20 @@ class Handler(BaseHTTPRequestHandler):
         path = os.path.join(TEMPLATE_DIR, template_name)
         if not os.path.isfile(path):
             return self._send(404, "not found", "text/plain")
-        with open(path, "rb") as f:
-            self._send(200, f.read(), "text/html; charset=utf-8")
+        with open(path, "r", encoding="utf-8") as f:
+            html = f.read()
+        # A fresh nonce per response: only the page's own inline <script>
+        # may run, so injected markup can never execute script even if an
+        # escaping bug slipped through (defence in depth against XSS).
+        nonce = secrets.token_urlsafe(18)
+        html = html.replace("<script>", f'<script nonce="{nonce}">')
+        csp = ("default-src 'self'; "
+               f"script-src 'nonce-{nonce}'; "
+               "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+               "font-src 'self' https://fonts.gstatic.com; "
+               "img-src 'self' data:; connect-src 'self'; "
+               "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+        self._send(200, html, "text/html; charset=utf-8", csp=csp)
 
     def log_message(self, fmt, *args):
         # Quiet default access log; keep errors visible.
@@ -365,6 +494,24 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- routing --------------------------------------------------------
     def do_GET(self):
+        if not self._host_allowed():
+            return self._send(403, "host not allowed", "text/plain")
+        try:
+            return self._get()
+        except Exception:
+            return self._json({"error": "internal error"}, 500)
+
+    def do_POST(self):
+        if not self._host_allowed():
+            return self._send(403, "host not allowed", "text/plain")
+        if not self._same_origin_post():
+            return self._json({"error": "cross-site request refused"}, 403)
+        try:
+            return self._post()
+        except Exception:
+            return self._json({"error": "internal error"}, 500)
+
+    def _get(self):
         url = urlparse(self.path)
         parts = [p for p in url.path.split("/") if p]
 
@@ -408,25 +555,45 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._send(404, "not found", "text/plain")
 
-    def do_POST(self):
+    def _post(self):
         url = urlparse(self.path)
         if url.path != "/api/analyze":
             return self._send(404, "not found", "text/plain")
 
-        length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0 or length > 50 * 1024 * 1024:   # 50 MB upload cap
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json({"error": "invalid Content-Length"}, 400)
+        if length <= 0 or length > MAX_UPLOAD:          # 50 MB upload cap
             return self._json({"error": "missing or oversized body"}, 400)
-        body = self.rfile.read(length)
+        if not _slots.acquire(blocking=False):
+            return self._json({"error": f"{MAX_PARALLEL} analyses are "
+                               "already running - try again shortly"}, 429)
+        started = False
+        try:
+            started = self._start_analysis(self.rfile.read(length))
+            return started
+        finally:
+            if not started:
+                _slots.release()
+
+    def _start_analysis(self, body):
+        """Store the upload and start the pipeline thread.
+
+        Output: the response (truthy) when a thread was started - the thread
+                then owns the concurrency slot; False after an error reply.
+        """
         fields = parse_multipart(body, self.headers.get("Content-Type"))
 
         email = fields.get("email")
         if not email or not email.get("filename"):
-            return self._json({"error": "an .eml or .msg file is required"},
-                              400)
+            self._json({"error": "an .eml or .msg file is required"}, 400)
+            return False
         fname = sanitize_filename(email["filename"])
         if not fname.lower().endswith((".eml", ".msg")):
-            return self._json(
+            self._json(
                 {"error": "unsupported file type — upload .eml or .msg"}, 400)
+            return False
 
         analysis_id = uuid.uuid4().hex
         adir = os.path.join(UPLOAD_DIR, analysis_id)
@@ -452,7 +619,9 @@ class Handler(BaseHTTPRequestHandler):
 
         options = {"skip_intel": flag("skip_intel"),
                    "skip_whois": flag("skip_whois"),
-                   "ai": flag("ai"), "yara_rules": yara_path}
+                   "ai": flag("ai"), "ai_body": flag("ai_body"),
+                   "ai_images": flag("ai_images"),
+                   "share_urls": flag("share_urls"), "yara_rules": yara_path}
 
         with db() as conn:
             conn.execute(
@@ -464,7 +633,8 @@ class Handler(BaseHTTPRequestHandler):
         threading.Thread(target=run_analysis,
                          args=(analysis_id, email_path, options),
                          daemon=True).start()
-        return self._json({"id": analysis_id})
+        self._json({"id": analysis_id})
+        return True
 
     # ---- API implementations -------------------------------------------
     def api_stats(self):
@@ -512,7 +682,11 @@ class Handler(BaseHTTPRequestHandler):
         if needle:
             clauses.append("filename LIKE ?"); params.append(f"%{needle}%")
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        limit = min(int((q.get("limit") or ["200"])[0] or 200), 1000)
+        try:
+            limit = int((q.get("limit") or ["200"])[0] or 200)
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 1000))
         with db() as conn:
             items = [dict(r) for r in conn.execute(
                 f"SELECT id, filename, created_utc, status, verdict, score, "
@@ -522,8 +696,46 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"items": items})
 
 
+def build_allowed_hosts(bind_host, port, extra):
+    """
+    Input : bind_host (--host), port (--port), extra (--allow-host values,
+            "name" or "name:port").
+    Output: set of lowercase Host header values to accept.
+    Rules : loopback names (127.0.0.1, localhost, [::1]) and a specific bind
+            address are accepted as "name:port" (plus the bare name when the
+            port is 80/443, where browsers omit it). An --allow-host value is
+            accepted exactly as given and, without a port, also as
+            "name:port" - covering reverse proxies that keep or rewrite the
+            port. A wildcard bind (0.0.0.0 / ::) adds no names by itself.
+    """
+    def norm(h):
+        h = h.strip().lower()
+        if ":" in h and not h.startswith("[") and h.count(":") > 1:
+            h = f"[{h}]"                     # bare IPv6 -> bracketed form
+        return h
+
+    names = {"127.0.0.1", "localhost", "[::1]"}
+    if bind_host not in ("0.0.0.0", "::", ""):
+        names.add(norm(bind_host))
+    out = set()
+    for n in names:
+        out.add(f"{n}:{port}")
+        if port in (80, 443):
+            out.add(n)
+    for h in extra or []:
+        h = norm(h)
+        if not h:
+            continue
+        out.add(h)
+        has_port = h.rsplit(":", 1)[-1].isdigit() and not h.endswith("]")
+        if not has_port:
+            out.add(f"{h}:{port}")
+    return out
+
+
 def main():
-    global SKILLS_ROOT
+    global SKILLS_ROOT, ALLOWED_HOSTS, MAX_PARALLEL, _slots, \
+        STAGE_TIMEOUT, ANALYSIS_TIMEOUT
     ap = argparse.ArgumentParser(description="phishHunter Web UI")
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (default 127.0.0.1 — keep local; put "
@@ -537,7 +749,30 @@ def main():
                          "per-user location or $PHISHHUNTER_CONFIG)")
     ap.add_argument("--no-config", action="store_true",
                     help="do not read the config file")
+    ap.add_argument("--allow-host", action="append", default=[],
+                    metavar="NAME[:PORT]",
+                    help="extra Host header value to accept, e.g. the "
+                         "name of an authenticated reverse proxy "
+                         "(repeatable). Loopback names are always allowed.")
+    ap.add_argument("--max-parallel", type=int, default=2,
+                    help="maximum concurrent analyses (default 2)")
+    ap.add_argument("--stage-timeout", type=int, default=300,
+                    help="per-stage pipeline timeout in seconds "
+                         "(default 300)")
+    ap.add_argument("--analysis-timeout", type=int, default=3600,
+                    help="hard limit for one analysis in seconds "
+                         "(default 3600)")
     args = ap.parse_args()
+
+    # Everything the console writes (uploads, reports, logs, the index -
+    # and the pipeline it starts) is created private to this user.
+    os.umask(0o077)
+    ALLOWED_HOSTS = build_allowed_hosts(args.host, args.port,
+                                        args.allow_host)
+    MAX_PARALLEL = max(1, args.max_parallel)
+    _slots = threading.BoundedSemaphore(MAX_PARALLEL)
+    STAGE_TIMEOUT = max(30, args.stage_timeout)
+    ANALYSIS_TIMEOUT = max(STAGE_TIMEOUT, args.analysis_timeout)
     if args.skills_root:
         SKILLS_ROOT = os.path.abspath(args.skills_root)
 
@@ -574,7 +809,12 @@ def main():
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"phishHunter Web UI  →  http://{args.host}:{args.port}")
     print(f"  skills root : {SKILLS_ROOT}")
-    print(f"  data dir    : {DATA_DIR}")
+    print(f"  data dir    : {DATA_DIR}  (private: 700/600)")
+    print(f"  accepts Host: {', '.join(sorted(ALLOWED_HOSTS))}")
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print("  WARNING: listening beyond loopback with NO authentication."
+              " Put an authenticated reverse proxy in front and pass its "
+              "name with --allow-host.", file=sys.stderr)
     print(f"  key config  : {cfg_line}")
     print(f"  API keys    : {', '.join(keys) if keys else 'none set'}")
     try:

@@ -21,11 +21,12 @@ export URLSCAN_API_KEY="your_api_key_here"
 ## Usage (CLI)
 
 ```bash
-# 1) Scan a URL (submits, waits for the result, prints verdict summary)
+# 1) Scan a URL privately (submits, waits for the result, prints verdict summary)
 python scripts/urlscan_lookup.py scan "http://suspicious.example/login"
 
-# Private scan (not listed publicly - use for potentially sensitive URLs)
-python scripts/urlscan_lookup.py scan "http://suspicious.example/login" --visibility private
+# Scans are PRIVATE by default (not visible to other users). Make one public
+# only when the URL carries no victim address / token and the user agrees:
+python scripts/urlscan_lookup.py scan "http://suspicious.example/login" --visibility public
 
 # 2) Search historical scans by domain
 python scripts/urlscan_lookup.py search-domain example.com
@@ -70,6 +71,6 @@ Exit codes: 0 success, 1 error, 2 malicious verdict.
 
 ## Workflow guidance for Claude
 
-1. Extract link URLs from the email the user is triaging; scan each with `scan`. Prefer `--visibility private` if the URL may contain tokens/PII (public scans are visible to everyone).
+1. Extract link URLs from the email the user is triaging; scan each with `scan`. Scans are private by default; use `--visibility public` only if the user explicitly agrees and the URL carries no tokens/PII (public scans are visible to everyone, including the attacker).
 2. Use `search-domain` / `search-ip` first to see if the community already scanned the infrastructure — saves quota and is instant.
 3. Summarize for the user: verdict, detected brand (phishing kits impersonate brands), screenshot and report links.
