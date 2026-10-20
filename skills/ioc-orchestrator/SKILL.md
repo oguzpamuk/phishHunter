@@ -18,7 +18,14 @@ parallel, and merges everything into one JSON report with an overall verdict.
 
 Sources whose API key environment variable is missing are automatically
 skipped and listed under `"skipped"` — the orchestrator never fails just
-because one key is absent.
+because one key is absent. Sources that were queried but failed (invalid
+key, network error, rate limit) are listed under `"errors"` with the final
+error line only (not the full traceback). Answers that ran but produced no
+result (urlscan "Scan did not finish in time", queued-only jobs) are also
+recorded under `"errors"` as `incomplete: ...`, never as coverage.
+
+**Read `coverage` before trusting a verdict.** `overall_verdict: "unknown"`
+with `coverage.jobs_ok == 0` means *nothing was checked* — it is not "clean".
 
 ## Requirements
 
@@ -59,7 +66,10 @@ python scripts/ioc_orchestrator.py /path/to/attachment.docx --upload
 #   --sources vt,abuseipdb,otx   Restrict to specific sources
 #                                (ids: vt, abuseipdb, urlscan, otx, ha)
 #   --timeout N                  Per-source timeout in seconds (default 420)
-#   --workers N                  Max parallel workers (default 8)
+#   --workers N                  Max parallel workers (default 0 = one per
+#                                (IOC, source) job, capped at 32). Every IOC
+#                                and source runs concurrently, so total time
+#                                is ~one per-source timeout.
 #   --upload                     Upload local files instead of hash lookup
 #   --raw                        Include each source's full JSON output
 ```
@@ -82,13 +92,17 @@ One JSON object per run on stdout:
       "errors": {}
     }
   ],
-  "overall_verdict": "malicious"
+  "overall_verdict": "malicious",
+  "coverage": {"jobs_ok": 7, "jobs_error": 1, "jobs_skipped": 3,
+               "sources_ok": ["virustotal", "abuseipdb"],
+               "sources_error": ["urlscan"], "sources_skipped": ["alienvault-otx"]}
 }
 ```
 
 Overall verdict = worst verdict across sources
 (malicious > suspicious > clean > unknown).
-Exit codes: 0 = clean/suspicious/unknown, 1 = fatal error, 2 = any IOC malicious.
+Exit codes: 0 = clean/suspicious/unknown, 1 = fatal error (incl. no API keys),
+2 = any IOC malicious, 3 = every attempted source query failed (no data).
 
 ## Workflow guidance for Claude
 

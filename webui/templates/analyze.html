@@ -134,12 +134,13 @@ function paintRail(stages) {
   for (const s of stages) {
     const li = document.createElement("li");
     // "pending" keeps the hollow default node; map others to CSS classes.
-    li.className = s.status === "ok" ? "ok"
+    li.className = s.status === "ok" ? (s.warning ? "warn" : "ok")
                  : s.status === "error" ? "error"
                  : s.status === "skipped" ? "skipped"
                  : s.status === "running" ? "running" : "";
     let meta = "";
     if (s.status === "ok" && s.duration_s != null) meta = `${s.duration_s}s`;
+    if (s.status === "ok" && s.warning) meta += ` · ${s.warning}`;
     if (s.status === "skipped") meta = `skipped (${s.error || "–"})`;
     if (s.status === "error")   meta = s.error || "error";
     li.innerHTML = `<span class="node"></span>

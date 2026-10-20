@@ -507,6 +507,21 @@ def sec_intel(report, max_rows):
     out.append(Paragraph(
         f"Overall intel verdict: <b>{esc(intel.get('overall_verdict'))}</b>",
         S_BODY))
+    cov = intel.get("coverage") or {}
+    if cov and not intel.get("note"):
+        if cov.get("jobs_ok", 0) == 0:
+            errs = "; ".join("%s: %s" % (k, v)
+                             for k, v in (cov.get("errors") or {}).items())
+            text = ("<b>No threat-intel source returned data.</b> "
+                    "'unknown' means unchecked, not clean.")
+            if errs:
+                text += " Errors: " + esc(errs, max_len=300)
+            out.append(Paragraph(text, S_BODY))
+        elif cov.get("jobs_error") or cov.get("jobs_skipped"):
+            out.append(Paragraph(
+                f"Partial coverage: {cov.get('jobs_ok')} ok, "
+                f"{cov.get('jobs_error')} failed, "
+                f"{cov.get('jobs_skipped')} skipped.", S_SMALL))
     rows = []
     for r in intel.get("results") or []:
         breakdown = " · ".join(f"{k}={v}" for k, v in
@@ -584,7 +599,7 @@ def sec_ai(report):
 
 def sec_stages(report):
     """Section 11 — pipeline audit trail."""
-    rows = [[k, s.get("status"), s.get("error")]
+    rows = [[k, s.get("status"), s.get("error") or s.get("warning")]
             for k, s in (report.get("stages") or {}).items()]
     return [Paragraph("9. Pipeline Stages", S_H2),
             make_table(["Stage", "Status", "Error"], rows,

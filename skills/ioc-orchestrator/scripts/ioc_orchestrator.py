@@ -33,7 +33,9 @@ Options:
                          "vt,abuseipdb,urlscan,otx,ha". Default: all.
     --timeout N          Per-source subprocess timeout in seconds
                          (default 420 - sandbox/URL scans poll for a while).
-    --workers N          Max parallel worker threads (default 8).
+    --workers N          Max parallel worker threads (default 0 = one per
+                         (IOC, source) job, capped at 32). All IOCs and
+                         sources run concurrently.
     --upload             For local files: upload to VT + Hybrid Analysis
                          sandboxes instead of only hash lookups.
                          WARNING: uploads are shared with those communities.
@@ -57,13 +59,28 @@ Output (stdout):
               "errors":  {"<source>": "<error text>"}
             }, ...
           ],
-          "overall_verdict": "<worst verdict across all IOCs>"
+          "overall_verdict": "<worst verdict across all IOCs>",
+          "coverage": {
+            "jobs_ok": N,        # source queries that returned data
+            "jobs_error": N,     # failed (bad key, network, rate limit) or
+                                 # incomplete (scan did not finish in time)
+            "jobs_skipped": N,   # not run (API key not set)
+            "jobs_no_verdict": N,# answered, but source has no record
+            "sources_ok": [...], "sources_error": [...],
+            "sources_skipped": [...]
+          }
         }
+
+    IMPORTANT: "overall_verdict": "unknown" with jobs_ok == 0 means NOTHING
+    was actually checked - it does NOT mean the IOC is clean. Callers must
+    read "coverage" before trusting a verdict.
 
 Exit codes:
     0 = run completed, nothing malicious
-    1 = fatal orchestrator error (bad args, scripts missing)
+    1 = fatal orchestrator error (bad args, scripts missing, no API keys)
     2 = run completed and at least one IOC verdict is MALICIOUS
+    3 = every source query that was attempted FAILED (invalid key, network
+        down, rate limit...) - no reputation data at all was obtained
 """
 
 import argparse
@@ -180,6 +197,26 @@ def sha256_of_file(path: str) -> str:
     return h.hexdigest()
 
 
+def short_error(text: str, limit: int = 300) -> str:
+    """
+    Reduce a child process's stderr to its most informative single line.
+
+    Input:  raw stderr text (may be a multi-line Python traceback).
+    Output: the last non-empty line (the exception / "ERROR: ..." message),
+            truncated to `limit` chars. Tracebacks otherwise hide the real
+            cause (e.g. "ERROR: VT API 401: Wrong API key") below pages of
+            frames.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return "no output"
+    # Prefer an explicit "ERROR:" line written by the tool scripts.
+    for ln in reversed(lines):
+        if ln.startswith("ERROR:"):
+            return ln[:limit]
+    return lines[-1][:limit]
+
+
 def run_source(source_name: str, script_path: str, cli_args, timeout: int):
     """
     Execute one source CLI script as a subprocess and parse its JSON output.
@@ -208,22 +245,45 @@ def run_source(source_name: str, script_path: str, cli_args, timeout: int):
         try:
             return json.loads(stdout), None
         except json.JSONDecodeError:
-            return None, f"non-JSON output: {stdout[:300]}"
+            return None, f"non-JSON output: {short_error(stdout)}"
     # No stdout at all -> report whatever the tool wrote to stderr.
-    return None, (proc.stderr or "no output").strip()[:300]
+    return None, short_error(proc.stderr)
 
 
-def triage_ioc(ioc: str, args, scripts_dir: str, executor) -> dict:
+def incomplete_reason(summary: dict):
     """
-    Fan out one IOC to all applicable+enabled sources in parallel.
+    Detect a source answer that ran but produced no usable result.
+
+    Input:  summary dict printed by a source script.
+    Output: reason string when the answer is incomplete, else None.
+            Covers urlscan's "Scan did not finish in time" and any job that
+            only queued work ("status": "queued", e.g. --no-wait runs).
+            Such answers must not count as coverage: no verdict was obtained.
+    """
+    if not isinstance(summary, dict):
+        return "malformed summary"
+    note = str(summary.get("note") or "").lower()
+    if "did not finish" in note or "timed out" in note:
+        return summary.get("note")
+    if summary.get("status") == "queued" and "verdict" not in summary:
+        return "analysis queued, no result yet"
+    return None
+
+
+def submit_ioc(ioc: str, args, scripts_dir: str, executor):
+    """
+    Plan and SUBMIT every applicable source job for one IOC (non-blocking).
 
     Input:
         ioc         : the IOC string
         args        : parsed argparse namespace (sources filter, upload, ...)
         scripts_dir : directory containing the tool scripts
-        executor    : shared ThreadPoolExecutor for parallelism
+        executor    : shared ThreadPoolExecutor
     Output:
-        Per-IOC result dict (see module docstring "results" schema).
+        (result_dict, {source_name: future}) - result_dict already holds
+        "skipped"/"errors" decided before running; futures are collected
+        later by collect_ioc(). Submitting all IOCs before collecting any
+        is what makes parallelism span IOCs as well as sources.
     """
     ioc_type = detect_type(ioc)
     result = {"ioc": ioc, "detected_type": ioc_type,
@@ -239,7 +299,6 @@ def triage_ioc(ioc: str, args, scripts_dir: str, executor) -> dict:
     elif ioc_type == "file" and args.upload:
         effective_type = "upload"
 
-    # Build the list of (source_name, future) jobs to run in parallel.
     futures = {}
     enabled = {s.strip() for s in args.sources.split(",")} if args.sources else None
     for name, cfg in SOURCES.items():
@@ -262,12 +321,26 @@ def triage_ioc(ioc: str, args, scripts_dir: str, executor) -> dict:
             cli_args.append("--raw")
         futures[name] = executor.submit(run_source, name, script_path,
                                         cli_args, args.timeout)
+    return result, futures
 
-    # Collect results as the parallel jobs finish.
+
+def collect_ioc(result: dict, futures: dict) -> dict:
+    """
+    Wait for one IOC's source jobs and aggregate them.
+
+    Input:  result dict + futures from submit_ioc().
+    Output: completed per-IOC result (see module docstring schema).
+            Answers that ran but returned nothing usable (incomplete_reason)
+            are recorded under "errors", not "sources".
+    """
     for name, fut in futures.items():
         summary, err = fut.result()
         if err:
             result["errors"][name] = err
+            continue
+        why = incomplete_reason(summary)
+        if why:
+            result["errors"][name] = f"incomplete: {why}"
             continue
         verdict = summary.get("verdict", "unknown")
         result["verdict_breakdown"][name] = verdict
@@ -277,6 +350,45 @@ def triage_ioc(ioc: str, args, scripts_dir: str, executor) -> dict:
     verdicts = list(result["verdict_breakdown"].values()) or ["unknown"]
     result["overall_verdict"] = max(verdicts, key=lambda v: VERDICT_RANK.get(v, 0))
     return result
+
+
+def triage_ioc(ioc: str, args, scripts_dir: str, executor) -> dict:
+    """
+    Convenience wrapper: submit + collect a single IOC (blocking).
+
+    Input/Output: as submit_ioc() / collect_ioc(). Kept for callers that
+    import this module; main() uses submit-all-then-collect instead.
+    """
+    result, futures = submit_ioc(ioc, args, scripts_dir, executor)
+    return collect_ioc(result, futures)
+
+
+def build_coverage(results) -> dict:
+    """
+    Summarise which source queries really returned data.
+
+    Input:  list of per-IOC result dicts from triage_ioc().
+    Output: {"jobs_ok", "jobs_error", "jobs_skipped",
+             "sources_ok", "sources_error", "sources_skipped"}
+            Counts are per (IOC, source) pair; source lists are unique names.
+    """
+    cov = {"jobs_ok": 0, "jobs_error": 0, "jobs_skipped": 0}
+    names = {"ok": set(), "error": set(), "skipped": set()}
+    for r in results:
+        for key, bucket in (("sources", "ok"), ("errors", "error"),
+                            ("skipped", "skipped")):
+            for src in r.get(key, {}):
+                cov[f"jobs_{bucket}"] += 1
+                names[bucket].add(src)
+    for bucket in ("ok", "error", "skipped"):
+        cov[f"sources_{bucket}"] = sorted(names[bucket])
+    # Answers with no verdict (e.g. "not found in VirusTotal") are valid
+    # coverage, but worth surfacing: "unknown" here means "source has no
+    # record", not "source failed".
+    cov["jobs_no_verdict"] = sum(
+        1 for r in results for v in r.get("verdict_breakdown", {}).values()
+        if v not in ("malicious", "suspicious", "clean"))
+    return cov
 
 
 def main():
@@ -289,8 +401,9 @@ def main():
                         help="Comma-separated source ids: vt,abuseipdb,urlscan,otx,ha")
     parser.add_argument("--timeout", type=int, default=420,
                         help="Per-source timeout in seconds (default 420)")
-    parser.add_argument("--workers", type=int, default=8,
-                        help="Max parallel workers (default 8)")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="Max parallel workers (default 0 = one per "
+                             "job, capped at 32)")
     parser.add_argument("--upload", action="store_true",
                         help="Upload local files to VT/HA sandboxes "
                              "(shared with their communities!)")
@@ -311,14 +424,26 @@ def main():
     # One shared thread pool: parallelism spans BOTH sources and IOCs.
     # Threads (not processes) are the right choice - the work is pure
     # network I/O inside the child subprocesses.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        results = [triage_ioc(ioc, args, args.scripts_dir, pool)
+    # Size the pool so every (IOC, source) job can run at once: total wall
+    # time is then ~one per-source timeout, which is what callers budget
+    # for (the triage pipeline passes --timeout below its own limit).
+    workers = args.workers or min(32, max(4, len(args.iocs) * len(SOURCES)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        # Submit EVERY IOC first, then collect - otherwise each IOC would
+        # wait for its slowest source before the next IOC even started.
+        planned = [submit_ioc(ioc, args, args.scripts_dir, pool)
                    for ioc in args.iocs]
+        results = [collect_ioc(res, futs) for res, futs in planned]
 
     overall = max((r["overall_verdict"] for r in results),
                   key=lambda v: VERDICT_RANK.get(v, 0))
-    print(json.dumps({"results": results, "overall_verdict": overall},
-                     indent=2, ensure_ascii=False))
+    coverage = build_coverage(results)
+    print(json.dumps({"results": results, "overall_verdict": overall,
+                      "coverage": coverage}, indent=2, ensure_ascii=False))
+    if coverage["jobs_ok"] == 0 and coverage["jobs_error"] > 0:
+        sys.stderr.write("WARNING: every attempted source query failed - "
+                         "no reputation data was obtained (see 'errors').\n")
+        sys.exit(3)
     sys.exit(2 if overall == "malicious" else 0)
 
 

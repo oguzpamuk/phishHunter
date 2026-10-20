@@ -190,6 +190,7 @@ label.check { display: flex; gap: 8px; align-items: center;
 .rail .name { font-weight: 600; }
 .rail .meta { color: var(--faint); font-size: 12.5px; font-family: var(--mono); }
 .rail li.ok .node      { border-color: var(--clean); background: var(--clean); }
+.rail li.warn .node    { border-color: var(--suspicious); background: var(--suspicious); }
 .rail li.error .node   { border-color: var(--malicious); background: var(--malicious); }
 .rail li.skipped .node { border-color: var(--faint); }
 .rail li.skipped .name { color: var(--faint); }

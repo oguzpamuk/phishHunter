@@ -30,7 +30,12 @@ One command → full SOC-style investigation of an email → final verdict.
 
 Every stage is fail-soft: missing skills, missing API keys, or no network
 never abort the run — the report notes what was skipped and the verdict
-confidence is lowered accordingly.
+confidence is lowered accordingly. The intel stage is judged by what
+actually answered: if every source query fails (bad key, network, rate limit)
+it is reported as `error`; if some fail it stays `ok` with a `warning`
+(degraded) and confidence cannot be `high`. `unknown` intel never means clean.
+Each intel source gets `--timeout` minus 30 s, so a single slow lookup fails
+on its own without losing the other results.
 
 ## Quick start (CLI)
 

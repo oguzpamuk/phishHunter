@@ -270,6 +270,7 @@ def read_progress(analysis_id):
                     stages[name]["status"] = ev.get("status", "ok")
                     stages[name]["duration_s"] = ev.get("duration_s")
                     stages[name]["error"] = ev.get("error")
+                    stages[name]["warning"] = ev.get("warning")
                 elif etype == "stage_skip" and name in stages:
                     stages[name]["status"] = "skipped"
                     stages[name]["error"] = ev.get("reason")
