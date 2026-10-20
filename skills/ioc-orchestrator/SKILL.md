@@ -23,6 +23,14 @@ key, network error, rate limit) are listed under `"errors"` with the final
 error line only (not the full traceback). Answers that ran but produced no
 result (urlscan "Scan did not finish in time", queued-only jobs) are also
 recorded under `"errors"` as `incomplete: ...`, never as coverage.
+When a source answers HTTP 400/422 AND its message names the indicator as
+invalid, reserved, unresolvable or blocked (e.g. `Invalid domain`, urlscan
+`DNS Error - Could not resolve domain`), it has refused the indicator itself.
+Those go under `"rejected"`, not `"errors"`: they are not key/network
+failures. A 400 that reports a malformed request (e.g. Hybrid Analysis
+`validation failed: hash: This value should not be blank.`) stays in
+`"errors"`, because it points at a client-side bug. Error texts carry the API's
+own message extracted from its (possibly truncated, multi-line) JSON body.
 
 **Read `coverage` before trusting a verdict.** `overall_verdict: "unknown"`
 with `coverage.jobs_ok == 0` means *nothing was checked* — it is not "clean".
@@ -93,9 +101,11 @@ One JSON object per run on stdout:
     }
   ],
   "overall_verdict": "malicious",
-  "coverage": {"jobs_ok": 7, "jobs_error": 1, "jobs_skipped": 3,
+  "coverage": {"jobs_ok": 7, "jobs_error": 1, "jobs_rejected": 1,
+               "jobs_skipped": 3, "jobs_no_verdict": 2,
                "sources_ok": ["virustotal", "abuseipdb"],
-               "sources_error": ["urlscan"], "sources_skipped": ["alienvault-otx"]}
+               "sources_error": ["urlscan"], "sources_rejected": ["alienvault-otx"],
+               "sources_skipped": ["hybrid-analysis"]}
 }
 ```
 

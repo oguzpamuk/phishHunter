@@ -517,11 +517,19 @@ def sec_intel(report, max_rows):
             if errs:
                 text += " Errors: " + esc(errs, max_len=300)
             out.append(Paragraph(text, S_BODY))
-        elif cov.get("jobs_error") or cov.get("jobs_skipped"):
+        elif (cov.get("jobs_error") or cov.get("jobs_skipped")
+              or cov.get("jobs_rejected")):
             out.append(Paragraph(
-                f"Partial coverage: {cov.get('jobs_ok')} ok, "
+                f"Coverage: {cov.get('jobs_ok')} ok, "
                 f"{cov.get('jobs_error')} failed, "
+                f"{cov.get('jobs_rejected', 0)} rejected as invalid, "
                 f"{cov.get('jobs_skipped')} skipped.", S_SMALL))
+    excl = intel.get("excluded") or []
+    if excl:
+        out.append(Paragraph(
+            "Not sent (reserved / non-routable names): "
+            + esc(", ".join(e.get("ioc", "") for e in excl), max_len=300),
+            S_SMALL))
     rows = []
     for r in intel.get("results") or []:
         breakdown = " · ".join(f"{k}={v}" for k, v in
@@ -599,7 +607,8 @@ def sec_ai(report):
 
 def sec_stages(report):
     """Section 11 — pipeline audit trail."""
-    rows = [[k, s.get("status"), s.get("error") or s.get("warning")]
+    rows = [[k, s.get("status"),
+             s.get("error") or s.get("warning") or s.get("note")]
             for k, s in (report.get("stages") or {}).items()]
     return [Paragraph("9. Pipeline Stages", S_H2),
             make_table(["Stage", "Status", "Error"], rows,

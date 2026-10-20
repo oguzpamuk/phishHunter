@@ -55,8 +55,9 @@ Output (stdout):
               "overall_verdict": "malicious|suspicious|clean|unknown",
               "verdict_breakdown": {"<source>": "<verdict>", ...},
               "sources": {"<source>": {<summary JSON from that tool>}},
-              "skipped": {"<source>": "<reason>"},
-              "errors":  {"<source>": "<error text>"}
+              "skipped":  {"<source>": "<reason>"},
+              "errors":   {"<source>": "<error text>"},
+              "rejected": {"<source>": "<API 400/422 message>"}
             }, ...
           ],
           "overall_verdict": "<worst verdict across all IOCs>",
@@ -64,10 +65,12 @@ Output (stdout):
             "jobs_ok": N,        # source queries that returned data
             "jobs_error": N,     # failed (bad key, network, rate limit) or
                                  # incomplete (scan did not finish in time)
+            "jobs_rejected": N,  # source refused the indicator (HTTP 400/
+                                 # 422: invalid, reserved, unresolvable)
             "jobs_skipped": N,   # not run (API key not set)
             "jobs_no_verdict": N,# answered, but source has no record
             "sources_ok": [...], "sources_error": [...],
-            "sources_skipped": [...]
+            "sources_rejected": [...], "sources_skipped": [...]
           }
         }
 
@@ -197,24 +200,100 @@ def sha256_of_file(path: str) -> str:
     return h.hexdigest()
 
 
+API_ERROR_RE = re.compile(r"^ERROR: (?P<api>.+? API) (?P<code>\d{3}): (?P<body>.*)$")
+
+
+def api_error_message(body: str) -> str:
+    """
+    Pull the human-readable message out of an API error body.
+
+    Input:  the text after "ERROR: <X> API <code>: " - usually a JSON
+            document, often TRUNCATED by the tool scripts (500 chars), so
+            json.loads() alone is not enough.
+    Output: the message string ("Invalid domain (x)", "DNS Error - Could not
+            resolve domain", ...) or the raw body when nothing matches.
+    """
+    # Field-level validation errors (Hybrid Analysis style) name exactly
+    # which request parameter was rejected - surface them first. Works on
+    # truncated bodies too, so it runs before json.loads().
+    v = re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"errors"\s*:\s*\[\s*"([^"]+)"',
+                   body or "")
+    if v:
+        return "validation failed: " + "; ".join(f"{f}: {e}" for f, e in v)
+    try:
+        obj = json.loads(body)
+        if isinstance(obj, dict):
+            inner = obj.get("error", obj)
+            if isinstance(inner, dict):
+                obj = inner
+            for key in ("message", "detail", "description", "error"):
+                if isinstance(obj.get(key), str) and obj[key].strip():
+                    return obj[key].strip()
+    except (ValueError, TypeError):
+        pass
+    # Truncated JSON: grab the first "message"/"detail"/"description" value.
+    m = re.search(r'"(?:message|detail|description)"\s*:\s*"((?:[^"\\]|\\.)*)',
+                  body)
+    return m.group(1) if m else body
+
+
 def short_error(text: str, limit: int = 300) -> str:
     """
     Reduce a child process's stderr to its most informative single line.
 
     Input:  raw stderr text (may be a multi-line Python traceback).
-    Output: the last non-empty line (the exception / "ERROR: ..." message),
-            truncated to `limit` chars. Tracebacks otherwise hide the real
-            cause (e.g. "ERROR: VT API 401: Wrong API key") below pages of
-            frames.
+    Output: one line, truncated to `limit` chars:
+              * "ERROR: <X> API <code>: <message>" - the API's own message
+                extracted from its JSON body (see api_error_message)
+              * otherwise the last "ERROR:" line, or the last line (the
+                exception) of a traceback.
+            Tracebacks otherwise hide the real cause (e.g. "VT API 401:
+            Wrong API key") below pages of frames.
     """
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     if not lines:
         return "no output"
-    # Prefer an explicit "ERROR:" line written by the tool scripts.
-    for ln in reversed(lines):
-        if ln.startswith("ERROR:"):
+    # Prefer an explicit "ERROR:" line written by the tool scripts. Some
+    # APIs (urlscan) return pretty-printed multi-line JSON, so the lines
+    # after the last "ERROR:" line are joined back onto it.
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("ERROR:"):
+            ln = " ".join(lines[i:])
+            m = API_ERROR_RE.match(ln)
+            if m:
+                ln = (f"ERROR: {m.group('api')} {m.group('code')}: "
+                      f"{api_error_message(m.group('body'))}")
             return ln[:limit]
     return lines[-1][:limit]
+
+
+# HTTP codes a source uses to refuse a request it understood.
+REJECT_CODES = {"400", "422"}
+# A 400/422 counts as "the source refused THIS INDICATOR" only when the
+# message says so. Anything else (e.g. Hybrid Analysis "hash: This value
+# should not be blank") means OUR request was malformed - a real failure
+# that must stay visible, not be hidden as a rejection.
+REJECT_HINTS = ("invalid domain", "invalid url", "invalid ip",
+                "not a valid", "unable to parse", "could not resolve",
+                "dns error", "not resolvable", "unresolvable",
+                "blacklist", "blocklist", "prevented", "not allowed to scan",
+                "reserved", "private ip", "malformed")
+
+
+def is_rejection(err: str) -> bool:
+    """
+    Input:  error string produced by short_error().
+    Output: True when a source rejected the indicator itself (HTTP 400/422
+            AND a message naming the indicator as invalid / reserved /
+            unresolvable / blocked). False for real failures: 401/403 key,
+            429 rate limit, 5xx, network errors, timeouts, and 400s caused
+            by a malformed request (validation errors on our parameters).
+    """
+    m = re.match(r"^ERROR: .+? API (\d{3}):(.*)$", err or "", re.S)
+    if not (m and m.group(1) in REJECT_CODES):
+        return False
+    msg = m.group(2).lower()
+    return any(h in msg for h in REJECT_HINTS)
 
 
 def run_source(source_name: str, script_path: str, cli_args, timeout: int):
@@ -287,7 +366,7 @@ def submit_ioc(ioc: str, args, scripts_dir: str, executor):
     """
     ioc_type = detect_type(ioc)
     result = {"ioc": ioc, "detected_type": ioc_type,
-              "sources": {}, "skipped": {}, "errors": {},
+              "sources": {}, "skipped": {}, "errors": {}, "rejected": {},
               "verdict_breakdown": {}}
 
     # Local files: either upload to sandboxes, or hash-lookup everywhere.
@@ -331,10 +410,14 @@ def collect_ioc(result: dict, futures: dict) -> dict:
     Input:  result dict + futures from submit_ioc().
     Output: completed per-IOC result (see module docstring schema).
             Answers that ran but returned nothing usable (incomplete_reason)
-            are recorded under "errors", not "sources".
+            are recorded under "errors", not "sources". HTTP 400/422 answers
+            (the source refused this indicator) go to "rejected".
     """
     for name, fut in futures.items():
         summary, err = fut.result()
+        if err and is_rejection(err):
+            result["rejected"][name] = err
+            continue
         if err:
             result["errors"][name] = err
             continue
@@ -367,20 +450,23 @@ def build_coverage(results) -> dict:
     """
     Summarise which source queries really returned data.
 
-    Input:  list of per-IOC result dicts from triage_ioc().
-    Output: {"jobs_ok", "jobs_error", "jobs_skipped",
-             "sources_ok", "sources_error", "sources_skipped"}
+    Input:  list of per-IOC result dicts from collect_ioc().
+    Output: {"jobs_ok", "jobs_error", "jobs_rejected", "jobs_skipped",
+             "jobs_no_verdict",
+             "sources_ok", "sources_error", "sources_rejected",
+             "sources_skipped"}
             Counts are per (IOC, source) pair; source lists are unique names.
     """
-    cov = {"jobs_ok": 0, "jobs_error": 0, "jobs_skipped": 0}
-    names = {"ok": set(), "error": set(), "skipped": set()}
+    buckets = (("sources", "ok"), ("errors", "error"),
+               ("rejected", "rejected"), ("skipped", "skipped"))
+    cov = {f"jobs_{b}": 0 for _, b in buckets}
+    names = {b: set() for _, b in buckets}
     for r in results:
-        for key, bucket in (("sources", "ok"), ("errors", "error"),
-                            ("skipped", "skipped")):
+        for key, bucket in buckets:
             for src in r.get(key, {}):
                 cov[f"jobs_{bucket}"] += 1
                 names[bucket].add(src)
-    for bucket in ("ok", "error", "skipped"):
+    for _, bucket in buckets:
         cov[f"sources_{bucket}"] = sorted(names[bucket])
     # Answers with no verdict (e.g. "not found in VirusTotal") are valid
     # coverage, but worth surfacing: "unknown" here means "source has no

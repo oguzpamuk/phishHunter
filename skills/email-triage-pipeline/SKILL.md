@@ -36,6 +36,10 @@ it is reported as `error`; if some fail it stays `ok` with a `warning`
 (degraded) and confidence cannot be `high`. `unknown` intel never means clean.
 Each intel source gets `--timeout` minus 30 s, so a single slow lookup fails
 on its own without losing the other results.
+Reserved / non-routable names (`.example`, `.test`, `.invalid`, `.localhost`,
+`.local`, `.internal`, `example.com/net/org`) are never sent to intel or WHOIS
+and are listed under `intel.excluded`. HTTP 400/422 answers are recorded as
+`rejected` (the source refused that indicator) and do not degrade the stage.
 
 ## Quick start (CLI)
 

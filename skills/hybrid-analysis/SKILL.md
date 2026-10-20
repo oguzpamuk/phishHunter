@@ -42,6 +42,11 @@ python scripts/ha_lookup.py report <job_id_or_sha256>
 #   --no-wait   (upload only) Return job ID immediately, don't poll
 ```
 
+Hash lookups use the current `GET /search/hash?hash=<h>` endpoint and fall
+back to the legacy form-body `POST /search/hash` when the GET form is refused
+(HTTP 400/404/405), so the tool works against either API revision. Auth
+(401/403), rate-limit (429) and server errors are not retried.
+
 ## Output
 
 Condensed JSON on stdout:

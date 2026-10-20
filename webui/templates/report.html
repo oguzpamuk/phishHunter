@@ -258,7 +258,11 @@ async function render() {
     (intel.results || []).forEach(x => {
       Object.entries(x.errors || {}).forEach(([k, v]) =>
         probs.push(`${x.ioc}: ${k} failed — ${v}`));
+      Object.entries(x.rejected || {}).forEach(([k, v]) =>
+        probs.push(`${x.ioc}: ${k} rejected the indicator — ${v}`));
     });
+    (intel.excluded || []).forEach(e =>
+      probs.push(`${e.ioc}: not sent — ${e.reason}`));
     Object.entries(cov.skip_reasons || {}).forEach(([k, v]) =>
       probs.push(`${k} not queried — ${v}`));
     const rows = (intel.results || []).map(x => {
@@ -273,12 +277,13 @@ async function render() {
     const banner = none
       ? `<p class="empty" style="margin:0 0 10px"><b>No threat-intel source returned data.</b>
           “unknown” below means <i>unchecked</i>, not clean.</p>`
-      : (cov.jobs_error || cov.jobs_skipped
-          ? `<p class="empty" style="margin:0 0 10px">Partial coverage:
+      : (cov.jobs_error || cov.jobs_skipped || cov.jobs_rejected
+          ? `<p class="empty" style="margin:0 0 10px">Coverage:
               ${esc(cov.jobs_ok)} ok · ${esc(cov.jobs_error)} failed ·
+              ${esc(cov.jobs_rejected || 0)} rejected as invalid ·
               ${esc(cov.jobs_skipped)} skipped.</p>` : "");
     const detail = probs.length
-      ? `<details style="margin-top:10px"><summary>Source problems (${probs.length})</summary>
+      ? `<details style="margin-top:10px"><summary>Lookup details (${probs.length})</summary>
           <ul class="mono" style="color:var(--muted);margin:8px 0 0 18px">${
             probs.slice(0, 40).map(p => `<li>${esc(p)}</li>`).join("")}</ul></details>` : "";
     parts.push(card(sec("Threat intelligence") + banner +
@@ -338,7 +343,7 @@ async function render() {
      <td><span class="badge ${s.status === "ok" ? (s.warning ? "suspicious" : "clean") :
           s.status === "error" ? "malicious" : "error"}">${esc(s.warning && s.status === "ok" ? "ok · partial" : s.status)}</span></td>
      <td class="mono">${s.duration_s != null ? esc(s.duration_s) + "s" : "—"}</td>
-     <td style="color:var(--muted)">${esc(s.error || s.warning || "")}</td></tr>`).join("");
+     <td style="color:var(--muted)">${esc(s.error || s.warning || s.note || "")}</td></tr>`).join("");
   parts.push(card(sec("Pipeline stages") +
     `<table class="list"><thead><tr><th>Stage</th><th>Status</th>
      <th>Duration</th><th>Note</th></tr></thead><tbody>${srows}</tbody></table>`));

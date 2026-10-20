@@ -161,6 +161,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 PIPELINE_VERSION = "1.0"
@@ -516,29 +517,95 @@ def stage_yara(script, email_file, rules_path, tmpdir, timeout):
     return data
 
 
+# Names that can never exist on the public internet (RFC 2606 / RFC 6761 /
+# RFC 6762 / RFC 8375 / ICANN private-use TLD). Reputation and WHOIS
+# services reject them with HTTP 400, which wastes quota and used to show up
+# as "intel failures". They are excluded up front and listed in the report.
+SPECIAL_USE_TLDS = {
+    "example": "RFC 2606 documentation TLD",
+    "test": "RFC 2606 testing TLD",
+    "invalid": "RFC 2606 invalid-name TLD",
+    "localhost": "RFC 6761 loopback name",
+    "local": "RFC 6762 mDNS link-local name",
+    "internal": "ICANN private-use TLD",
+    "home.arpa": "RFC 8375 home-network name",
+    "onion": "RFC 7686 Tor onion name",
+}
+SPECIAL_USE_DOMAINS = {
+    "example.com": "RFC 2606 documentation domain",
+    "example.net": "RFC 2606 documentation domain",
+    "example.org": "RFC 2606 documentation domain",
+}
+
+
+def special_use_reason(host):
+    """Tell whether a hostname is reserved / not publicly resolvable.
+
+    Input : host - domain or hostname (any case, optional trailing dot).
+    Output: reason string (e.g. "RFC 2606 documentation TLD") when the name
+            can never be a real internet domain, else None.
+    """
+    h = (host or "").strip().lower().rstrip(".")
+    if not h or "." not in h and h != "localhost":
+        return "single-label name (not a public domain)" if h else None
+    for dom, why in SPECIAL_USE_DOMAINS.items():
+        if h == dom or h.endswith("." + dom):
+            return why
+    for tld, why in SPECIAL_USE_TLDS.items():
+        if h == tld or h.endswith("." + tld):
+            return why
+    return None
+
+
+def _url_host(url):
+    """Input: URL string. Output: lowercase hostname or None."""
+    try:
+        return urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
 def select_iocs_for_intel(iocs_report, attachment_paths,
                           max_urls, max_domains):
     """Choose which IOCs are worth spending API quota on.
 
     Selection policy:
       * all public IPs (headers usually contain only a handful)
-      * up to max_domains domains — sender domain first, then body/html ones
+      * up to max_domains domains - sender domain first, then body/html ones
       * up to max_urls URLs
       * all hashes found in text
       * every materialized attachment file (hashed locally by orchestrator)
-    Output: flat list of IOC strings / file paths for ioc_orchestrator.py.
+      * domains / URLs on reserved, non-routable names (.example, .test,
+        .invalid, .localhost, .local, example.com, ...) are NEVER sent:
+        every source rejects them and they carry no reputation.
+    Output: (selected, excluded)
+            selected - flat list of IOC strings / file paths for
+                       ioc_orchestrator.py (deduplicated, order kept)
+            excluded - [{"ioc": "...", "reason": "..."}] not sent
     """
     iocs = iocs_report.get("iocs") or {}
     sender = (iocs_report.get("sender") or {}).get("domain")
+    excluded = []
+
+    def keep(value, host):
+        why = special_use_reason(host)
+        if why:
+            excluded.append({"ioc": value, "reason": why})
+            return False
+        return True
+
     out = []
     out += [e["value"] for e in iocs.get("ips", []) if not e.get("private")]
 
-    domains = [e["value"] for e in iocs.get("domains", [])]
+    domains = [e["value"] for e in iocs.get("domains", [])
+               if keep(e["value"], e["value"])]
     if sender in domains:                       # sender domain gets priority
         domains.remove(sender)
         domains.insert(0, sender)
     out += domains[:max_domains]
-    out += [e["value"] for e in iocs.get("urls", [])][:max_urls]
+    urls = [e["value"] for e in iocs.get("urls", [])
+            if keep(e["value"], _url_host(e["value"]))]
+    out += urls[:max_urls]
     out += [e["value"] for e in iocs.get("hashes", [])]
     out += attachment_paths
     # Deduplicate, preserving order.
@@ -547,7 +614,7 @@ def select_iocs_for_intel(iocs_report, attachment_paths,
         if x not in seen:
             seen.add(x)
             uniq.append(x)
-    return uniq
+    return uniq, excluded
 
 
 INTEL_KEY_ENV = {"vt": "VT_API_KEY", "abuseipdb": "ABUSEIPDB_API_KEY",
@@ -575,35 +642,43 @@ def summarize_intel_coverage(intel):
     """Work out how much of the intel stage actually returned data.
 
     Input : ioc-orchestrator JSON ({"results": [...]}).
-    Output: {"jobs_ok", "jobs_error", "jobs_skipped", "jobs_no_verdict",
-             "sources_ok", "sources_error", "sources_skipped",
+    Output: {"jobs_ok", "jobs_error", "jobs_rejected", "jobs_skipped",
+             "jobs_no_verdict", "sources_ok", "sources_error",
+             "sources_rejected", "sources_skipped",
              "errors": {"<source>": "<first error text>"},
+             "rejected": {"<source>": "<first HTTP 400/422 message>"},
              "skip_reasons": {"<source>": "<why it was not run>"}}
             Computed here (not trusted from the orchestrator) so older
             orchestrator versions are judged the same way.
     A verdict of "unknown" with jobs_ok == 0 means nothing was checked.
     """
-    cov = {"jobs_ok": 0, "jobs_error": 0, "jobs_skipped": 0}
-    names = {"ok": set(), "error": set(), "skipped": set()}
-    errors, skip_reasons = {}, {}
+    cov = {"jobs_ok": 0, "jobs_error": 0, "jobs_rejected": 0,
+           "jobs_skipped": 0}
+    names = {"ok": set(), "error": set(), "rejected": set(),
+             "skipped": set()}
+    errors, skip_reasons, rejected = {}, {}, {}
     no_verdict = 0
     for r in (intel or {}).get("results", []) or []:
         for key, bucket in (("sources", "ok"), ("errors", "error"),
+                            ("rejected", "rejected"),
                             ("skipped", "skipped")):
             for src, val in (r.get(key) or {}).items():
                 cov[f"jobs_{bucket}"] += 1
                 names[bucket].add(src)
                 if bucket == "error":
                     errors.setdefault(src, str(val)[:200])
+                elif bucket == "rejected":
+                    rejected.setdefault(src, str(val)[:200])
                 elif bucket == "skipped":
                     skip_reasons.setdefault(src, str(val)[:120])
         no_verdict += sum(1 for v in (r.get("verdict_breakdown") or {})
                           .values()
                           if v not in ("malicious", "suspicious", "clean"))
-    for b in ("ok", "error", "skipped"):
+    for b in ("ok", "error", "rejected", "skipped"):
         cov[f"sources_{b}"] = sorted(names[b])
     cov["jobs_no_verdict"] = no_verdict
     cov["errors"] = errors
+    cov["rejected"] = rejected
     cov["skip_reasons"] = skip_reasons
     return cov
 
@@ -653,29 +728,42 @@ def judge_intel(intel_rep, keys):
 
     Input : intel_rep - stage_intel() output; keys - intel_key_status().
     Output: (status, message, level)
-            status "error"   -> no source returned data (all failed/skipped)
-            status "ok"      -> at least one source answered; message is a
-                                warning when some queries failed, else None
-            level            -> logging level name for the audit record
-    Sources skipped only because their API key is not set are a deliberate
-    configuration choice: reported at INFO via the intel_keys event, they do
-    not degrade a stage that otherwise answered.
+            status "error" -> no source returned data
+            status "ok"    -> at least one source answered
+            level "ERROR"   with status error
+                  "WARNING" when some queries FAILED (bad key, network,
+                            rate limit, timeout, incomplete scan) - degraded
+                  "INFO"    otherwise; message (may be None) is a note,
+                            e.g. indicators a source rejected
+    Not counted as failures (never degrade the stage):
+      * sources skipped because their API key is not set - a deliberate
+        configuration choice, reported via the intel_keys event;
+      * HTTP 400/422 "rejected" answers - the source refused that indicator
+        (malformed, reserved, unresolvable), which is an answer about the
+        IOC, not an outage.
     """
     cov = (intel_rep or {}).get("coverage") or {}
     ok, bad = cov.get("jobs_ok", 0), cov.get("jobs_error", 0)
+    rej = cov.get("jobs_rejected", 0)
     if (intel_rep or {}).get("note"):          # nothing to look up
         return "ok", None, "INFO"
 
-    def failures():
+    def listing(key):
         return "; ".join("%s: %s" % (k, str(v)[:110])
-                         for k, v in list(cov.get("errors", {}).items())[:3])
+                         for k, v in list((cov.get(key) or {}).items())[:3])
+
+    rejected_note = ("%d indicator lookup%s rejected by the source as "
+                     "invalid (%s)" % (rej, "" if rej == 1 else "s",
+                                       listing("rejected"))) if rej else None
 
     if ok == 0:
         why = []
         if bad:
             why.append("%d quer%s failed on %s (%s)" % (
                 bad, "y" if bad == 1 else "ies",
-                ", ".join(cov.get("sources_error", [])), failures()))
+                ", ".join(cov.get("sources_error", [])), listing("errors")))
+        if rejected_note:
+            why.append(rejected_note)
         if cov.get("jobs_skipped"):
             reasons = sorted(set((cov.get("skip_reasons") or {}).values()))
             why.append("skipped: " + (", ".join(reasons) or
@@ -687,9 +775,12 @@ def judge_intel(intel_rep, keys):
                 + " | ".join(why) + ". NO reputation evidence was obtained "
                 "(unknown != clean)", "ERROR")
     if bad:
-        return ("ok", "partial coverage: %d ok, %d failed (%s)"
-                % (ok, bad, failures()), "WARNING")
-    return "ok", None, "INFO"
+        msg = "partial coverage: %d ok, %d failed (%s)" % (
+            ok, bad, listing("errors"))
+        if rejected_note:
+            msg += " | " + rejected_note
+        return "ok", msg, "WARNING"
+    return "ok", rejected_note, "INFO"
 
 
 def parse_whois_date(value):
@@ -723,6 +814,7 @@ def stage_whois(script, iocs_report, max_domains, timeout):
 
     Queries: sender domain (always, if known), then other domains up to
     max_domains total, plus the first public IP (network ownership context).
+    Reserved / non-routable names (special_use_reason) are skipped.
 
     Output: dict {query -> whois JSON augmented with "age_days" (domains
             only; None when the creation date is unparseable)}.
@@ -731,13 +823,15 @@ def stage_whois(script, iocs_report, max_domains, timeout):
     iocs = iocs_report.get("iocs") or {}
     sender = (iocs_report.get("sender") or {}).get("domain")
     targets = []
-    if sender:
+    # Reserved names (.example, .test, ...) have no registration record;
+    # querying them only produces errors, so they are left out.
+    if sender and not special_use_reason(sender):
         targets.append(sender)
     for e in iocs.get("domains", []):
-        if e["value"] not in targets:
-            targets.append(e["value"])
         if len(targets) >= max_domains:
             break
+        if e["value"] not in targets and not special_use_reason(e["value"]):
+            targets.append(e["value"])
     public_ips = [e["value"] for e in iocs.get("ips", [])
                   if not e.get("private")]
     if public_ips:
@@ -2047,6 +2141,17 @@ def render_text(report):
         lines.append("Stage warnings (partial evidence):")
         for k, e in warns.items():
             lines.append(f"  {k}: {e}")
+    notes = {k: s["note"] for k, s in report["stages"].items()
+             if s.get("note")}
+    excl = (report.get("intel") or {}).get("excluded") or []
+    if notes or excl:
+        lines.append("-" * 62)
+        lines.append("Stage notes:")
+        for k, e in notes.items():
+            lines.append(f"  {k}: {e}")
+        if excl:
+            lines.append("  intel: not sent (reserved/non-routable): "
+                         + ", ".join(e["ioc"] for e in excl)[:300])
     lines.append("=" * 62)
     return "\n".join(lines)
 
@@ -2350,11 +2455,13 @@ def main(argv=None) -> int:
             try:
                 if not script:
                     raise RuntimeError("ioc-orchestrator skill not found")
-                sel = select_iocs_for_intel(iocs_rep, att_paths,
-                                            args.max_urls, args.max_domains)
-                log.debug("intel IOC selection",
-                          extra={"event": "intel_select",
-                                 "ioc_count": len(sel)})
+                sel, excluded = select_iocs_for_intel(
+                    iocs_rep, att_paths, args.max_urls, args.max_domains)
+                log.info(f"intel IOC selection: {len(sel)} selected, "
+                         f"{len(excluded)} reserved/non-routable excluded",
+                         extra={"event": "intel_select", "stage": "intel",
+                                "ioc_count": len(sel),
+                                "excluded": excluded})
                 keys = intel_key_status(args.sources)
                 log.info("intel API keys: "
                          f"{len(keys['configured'])} configured, "
@@ -2364,13 +2471,16 @@ def main(argv=None) -> int:
                                 "missing": keys["missing"]})
                 intel_rep = stage_intel(script, sel, args.sources,
                                         args.upload, args.timeout)
+                intel_rep["excluded"] = excluded
                 status, msg, lvl = judge_intel(intel_rep, keys)
                 stages["intel"]["status"] = status
                 stages["intel"]["coverage"] = intel_rep.get("coverage")
                 if msg:
-                    # error -> stage shown as failed; ok+msg -> degraded.
-                    stages["intel"]["error" if status == "error"
-                                    else "warning"] = msg
+                    # error -> stage failed; WARNING -> degraded;
+                    # INFO -> plain note (e.g. rejected indicators).
+                    field = ("error" if status == "error"
+                             else "warning" if lvl == "WARNING" else "note")
+                    stages["intel"][field] = msg
                     log.log(getattr(logging, lvl), msg,
                             extra={"event": "intel_coverage",
                                    "stage": "intel",

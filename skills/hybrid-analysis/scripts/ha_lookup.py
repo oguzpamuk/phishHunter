@@ -105,6 +105,44 @@ def api_call(method: str, path: str, **kwargs):
     return resp.json()
 
 
+def api_try(method: str, path: str, **kwargs):
+    """
+    Like api_call() but never exits - lets the caller try another form.
+
+    Input:  same as api_call().
+    Output: (status_code, parsed_json_or_None, body_text)
+    """
+    headers = {"api-key": get_api_key(),
+               "User-Agent": "Falcon Sandbox",
+               "accept": "application/json"}
+    resp = requests.request(method, API_BASE + path, headers=headers,
+                            timeout=120, **kwargs)
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    return resp.status_code, body, resp.text
+
+
+def extract_reports(raw) -> list:
+    """
+    Normalise a hash-search response into a list of report dicts.
+
+    Input:  /search/hash response in any of the shapes the API has used:
+              * a bare list of reports            (legacy POST form)
+              * {"result": [...]}                 (legacy wrapper)
+              * {"reports": [...], "sha256s": ...} (current GET form)
+    Output: list (possibly empty) of report dicts.
+    """
+    if isinstance(raw, list):
+        return [r for r in raw if isinstance(r, dict)]
+    if isinstance(raw, dict):
+        for key in ("reports", "result"):
+            if isinstance(raw.get(key), list):
+                return [r for r in raw[key] if isinstance(r, dict)]
+    return []
+
+
 def verdict_map(ha_verdict: str, threat_score) -> str:
     """
     Normalize the Hybrid Analysis verdict string into our common scheme.
@@ -163,13 +201,52 @@ def cmd_hash(args):
     Input:  args.indicator (MD5/SHA1/SHA256)
     Output: (summary, raw). If multiple reports exist, the one with the
             highest threat score is summarized and the rest are counted.
+    API:    GET /search/hash?hash=<h> (current), falling back to the legacy
+            POST form body when the GET form is refused (400/404/405).
     """
     h = args.indicator.strip().lower()
     if not re.fullmatch(r"[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}", h):
         sys.stderr.write("ERROR: hash must be a valid MD5/SHA1/SHA256 hex string.\n")
         sys.exit(1)
-    raw = api_call("POST", "/search/hash", data={"hash": h})
-    reports = raw if isinstance(raw, list) else raw.get("result", [])
+    # Hybrid Analysis moved hash search to "GET /search/hash?hash=..." and
+    # the legacy form-body POST now answers HTTP 400 "hash: This value should
+    # not be blank". Try the current form first and fall back to the legacy
+    # one, so the tool works against either API revision.
+    attempts = (("GET", {"params": {"hash": h}}),
+                ("POST", {"data": {"hash": h}}))
+    raw, failures = None, []
+    for method, kw in attempts:
+        status, body, text = api_try(method, "/search/hash", **kw)
+        if 200 <= status < 300:
+            raw = body
+            break
+        failures.append((method, status, text))
+        if status not in (400, 404, 405):
+            break          # auth / rate limit / server error: do not retry
+    if raw is None:
+        # A 404 on the current form with no other answer = never seen.
+        if failures and failures[0][1] == 404 and len(failures) == 1:
+            return {"indicator": h, "type": "hash", "verdict": "unknown",
+                    "note": "No sandbox reports found for this hash."}, {}
+        method, status, text = failures[0]
+        sys.stderr.write(f"ERROR: Hybrid Analysis API {status}: "
+                         f"{text[:500]}\n")
+        sys.exit(1)
+
+    reports = extract_reports(raw)
+    # The GET form may return report references (id/job_id) without the
+    # verdict fields - fetch the summaries of the first few.
+    if reports and not any(("verdict" in r or "threat_score" in r)
+                           for r in reports):
+        full = []
+        for r in reports[:3]:
+            ident = r.get("id") or r.get("job_id")
+            if not ident:
+                continue
+            status, body, _ = api_try("GET", f"/report/{ident}/summary")
+            if 200 <= status < 300 and isinstance(body, dict):
+                full.append(body)
+        reports = full or reports
     if not reports:
         return {"indicator": h, "type": "hash", "verdict": "unknown",
                 "note": "No sandbox reports found for this hash."}, raw

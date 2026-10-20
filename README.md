@@ -491,8 +491,9 @@ Intel health is logged explicitly so a green-looking run can't hide a dead looku
 
 | Event | Level | Meaning |
 |---|---|---|
+| `intel_select` | INFO | how many IOCs were sent and which reserved / non-routable names were `excluded` |
 | `intel_keys` | INFO | which source keys are `configured` / `missing` (names only) |
-| `intel_coverage` | ERROR / WARNING | no source answered (`ERROR`, stage = `error`) or some queries failed (`WARNING`, stage `ok (degraded)`), with per-source error text and the `coverage` counts |
+| `intel_coverage` | ERROR / WARNING / INFO | no source answered (`ERROR`, stage = `error`), some queries failed (`WARNING`, stage `ok (degraded)`), or only indicator rejections to note (`INFO`); carries per-source messages and the `coverage` counts |
 | `stage_end` | INFO / WARNING / ERROR | final status; carries a `warning` field for degraded stages |
 | `pipeline_end` | INFO | now also lists `stages_degraded` |
 
@@ -562,7 +563,7 @@ report notes it and lowers its confidence accordingly.
 
 All keys are **optional** — sources without a key are skipped automatically and noted in the report.
 
-> **Keys are not enough on their own — they must also *work*.** The intel stage is judged by what actually answered, not by whether the call ran. If every source query fails (invalid key, network down, rate limit) the stage is marked **`error`**, the report and PDF say *"No threat-intel source returned data — `unknown` means unchecked, not clean"*, and confidence drops to `medium`. If only some queries fail, the stage stays `ok` but is flagged **degraded** (`WARNING` in the audit log, "partial" badge in the UI). Sources skipped purely because their key is unset are a configuration choice and are listed at `INFO`, never as failures. All IOCs and sources are queried concurrently, and each source gets the stage `--timeout` minus 30 s, so one slow lookup (e.g. a URL scan that never finishes) is recorded as that source's failure instead of discarding every other result. Check which keys the run saw with `grep intel_keys audit.jsonl` (key *names* only, never values).
+> **Keys are not enough on their own — they must also *work*.** The intel stage is judged by what actually answered, not by whether the call ran. If every source query fails (invalid key, network down, rate limit) the stage is marked **`error`**, the report and PDF say *"No threat-intel source returned data — `unknown` means unchecked, not clean"*, and confidence drops to `medium`. If only some queries fail, the stage stays `ok` but is flagged **degraded** (`WARNING` in the audit log, "partial" badge in the UI). Sources skipped purely because their key is unset are a configuration choice and are listed at `INFO`, never as failures. Two cases are deliberately **not** counted as failures: (1) names that can never exist on the internet — `.example`, `.test`, `.invalid`, `.localhost`, `.local`, `.internal`, `example.com/net/org` (RFC 2606/6761) — are never sent to intel or WHOIS and are listed as *"not sent"* in the report; (2) a source answering HTTP 400/422 **with a message that names the indicator as invalid, reserved, unresolvable or blocked** (e.g. *"Invalid domain"*, urlscan *"DNS Error - Could not resolve domain"*) has refused that indicator, which is an answer about the IOC, not an outage — it is shown as *rejected*. A 400 caused by a malformed request (e.g. a parameter validation error) stays a real failure. Error texts show the API's own message, not raw JSON. All IOCs and sources are queried concurrently, and each source gets the stage `--timeout` minus 30 s, so one slow lookup (e.g. a URL scan that never finishes) is recorded as that source's failure instead of discarding every other result. Check which keys the run saw with `grep intel_keys audit.jsonl` (key *names* only, never values).
 
 | Env variable | Service | Free tier |
 |---|---|---|
