@@ -28,12 +28,17 @@ RUNNING
 ============================================================================
     python3 webui/app.py [--host 127.0.0.1] [--port 8787]
                          [--skills-root skills]
+                         [--config PATH | --no-config]
 
     Then open  http://127.0.0.1:8787
 
     Optional env for the intel stage (same as the CLI):
       VT_API_KEY, ABUSEIPDB_API_KEY, OTX_API_KEY, URLSCAN_API_KEY,
       HYBRID_ANALYSIS_API_KEY, ANTHROPIC_API_KEY
+    They are read at start-up from the private per-user config file
+    (python3 phishhunter.py config set virustotal ...); exported variables
+    win. --config PATH uses another file, --no-config disables it.
+    Easiest start:  python3 phishhunter.py web
 
 ============================================================================
 HTTP API (all JSON unless noted)
@@ -191,7 +196,11 @@ def run_analysis(analysis_id, email_path, options):
     cmd = [sys.executable, PIPELINE, email_path,
            "--skills-root", SKILLS_ROOT,
            "-o", report_path,
-           "--log-file", log_path, "--quiet"]
+           "--log-file", log_path, "--quiet",
+           # The server loaded the key config once at start-up and the child
+           # inherits os.environ; stop the pipeline re-reading it so the
+           # server's --config / --no-config choice holds.
+           "--no-config"]
     if options.get("skip_intel"):
         cmd.append("--skip-intel")
     if options.get("skip_whois"):
@@ -523,9 +532,40 @@ def main():
     ap.add_argument("--skills-root",
                     help="directory containing the skill folders "
                          "(default: <repo>/skills)")
+    ap.add_argument("--config",
+                    help="private API-key config file (default: the "
+                         "per-user location or $PHISHHUNTER_CONFIG)")
+    ap.add_argument("--no-config", action="store_true",
+                    help="do not read the config file")
     args = ap.parse_args()
     if args.skills_root:
         SKILLS_ROOT = os.path.abspath(args.skills_root)
+
+    # API keys: load the private config once; every analysis subprocess
+    # inherits them. Shell variables win; only NAMES are printed. An unsafe
+    # file is refused and the server does not start.
+    via = os.environ.get("PHISHHUNTER_CONFIG_LOADED_FROM")
+    cfg_line = (f"loaded by phishhunter.py ({via})" if via
+                else "not loaded (--no-config)")
+    if not args.no_config:
+        sys.path.insert(0, os.path.dirname(PIPELINE))
+        import phishhunter_config as phc  # shared, next to the pipeline
+        cfg = phc.load(args.config)
+        if cfg["error"]:
+            print(f"error: {cfg['error']}", file=sys.stderr)
+            sys.exit(2)
+        if args.config and not cfg["found"]:
+            print(f"error: config file not found: {cfg['path']}",
+                  file=sys.stderr)
+            sys.exit(2)
+        cfg_line = (f"{cfg['path']} ({len(cfg['loaded'])} key(s) loaded)"
+                    if cfg["found"] else
+                    "none (add keys: python3 phishhunter.py config set "
+                    "virustotal)")
+    keys = [k for k in ("VT_API_KEY", "ABUSEIPDB_API_KEY", "OTX_API_KEY",
+                        "URLSCAN_API_KEY", "HYBRID_ANALYSIS_API_KEY",
+                        "ANTHROPIC_API_KEY")
+            if os.environ.get(k, "").strip()]
 
     if not os.path.isfile(PIPELINE):
         print(f"error: pipeline not found at {PIPELINE}", file=sys.stderr)
@@ -535,6 +575,8 @@ def main():
     print(f"phishHunter Web UI  →  http://{args.host}:{args.port}")
     print(f"  skills root : {SKILLS_ROOT}")
     print(f"  data dir    : {DATA_DIR}")
+    print(f"  key config  : {cfg_line}")
+    print(f"  API keys    : {', '.join(keys) if keys else 'none set'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

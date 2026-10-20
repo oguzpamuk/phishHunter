@@ -63,6 +63,18 @@ export ANTHROPIC_API_KEY=...
 python3 scripts/triage_pipeline.py mail.eml --ai -o report.json --pretty
 ```
 
+### API keys
+
+Keys are read from environment variables and from the private per-user
+config file (`~/.config/phishhunter/config.ini`, `%APPDATA%\phishhunter\config.ini`
+on Windows, or `--config PATH` / `$PHISHHUNTER_CONFIG`). Fill it with
+`python3 phishhunter.py config set virustotal` (hidden input). Exported
+variables always win; only key names are logged (`config_file` audit
+event). The file is refused - and the run stops with the fix - when other
+users can access it. `--no-config` disables it. `scripts/phishhunter_config.py`
+is the shared loader; keep it next to `triage_pipeline.py` when installing
+this skill.
+
 ## Input
 
 - Positional: one `.eml` or `.msg` file (format auto-detected).

@@ -42,6 +42,17 @@ Skill discovery:
                           this skill's scripts/ dir is used if the standalone
                           ioc-extractor skill is not installed.
 
+API keys:
+    Keys are read from environment variables (VT_API_KEY, ABUSEIPDB_API_KEY,
+    OTX_API_KEY, URLSCAN_API_KEY, HYBRID_ANALYSIS_API_KEY, ANTHROPIC_API_KEY).
+    They are also read from the private per-user config file
+    (~/.config/phishhunter/config.ini; %APPDATA%\\phishhunter\\config.ini on
+    Windows) - fill it with:  python3 phishhunter.py config set virustotal
+    Variables already exported always win. The file is refused when other
+    users can read it. Only names are logged, never values.
+    --config PATH         Use this config file instead.
+    --no-config           Do not read the config file.
+
 Stage control:
     --skip-intel          Skip stage 5 (no reputation API calls). Use for
                           fully offline analysis.
@@ -163,6 +174,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+# Shared private API-key config (phishhunter_config.py sits next to this
+# script; it is one module, not a duplicated copy).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import phishhunter_config as phc  # noqa: E402
 
 PIPELINE_VERSION = "1.0"
 
@@ -2213,6 +2229,15 @@ def main(argv=None) -> int:
     ap.add_argument("--quiet", action="store_true",
                     help="suppress console logs (WARNING and above still "
                          "show). A --log-file still records everything.")
+    # --- API keys ----------------------------------------------------------
+    ap.add_argument("--config",
+                    help="private API-key config file (default: "
+                         "~/.config/phishhunter/config.ini, %%APPDATA%%\\"
+                         "phishhunter\\config.ini on Windows, or "
+                         "$PHISHHUNTER_CONFIG). Shell variables win.")
+    ap.add_argument("--no-config", action="store_true",
+                    help="do not read the config file (shell variables "
+                         "only)")
     args = ap.parse_args(argv)
 
     # ---- Logging setup --------------------------------------------------
@@ -2223,6 +2248,37 @@ def main(argv=None) -> int:
     setup_logging(level_name=args.log_level, log_file=args.log_file,
                   as_json=args.log_json, run_id=run_id,
                   console_level="WARNING" if args.quiet else None)
+
+    # ---- API keys from the private config file ---------------------------
+    # Loaded BEFORE any stage runs so every sub-skill subprocess inherits the
+    # keys. Shell variables win. Only variable NAMES are logged, never
+    # values. An unsafe file (other users can read it / not yours) is
+    # REFUSED - the run stops with the exact fix instead of silently going
+    # on without keys.
+    if args.no_config:
+        via = os.environ.get("PHISHHUNTER_CONFIG_LOADED_FROM")
+        if via:
+            log.info(f"API-key config handled by phishhunter.py: {via}",
+                     extra={"event": "config_file", "path": via,
+                            "loaded_by": "launcher"})
+    else:
+        cfg = phc.load(args.config)
+        if cfg["error"]:
+            log.error(cfg["error"], extra={"event": "config_file",
+                                           "path": cfg["path"]})
+            print(f"error: {cfg['error']}", file=sys.stderr)
+            return 3
+        if args.config and not cfg["found"]:
+            print(f"error: config file not found: {cfg['path']}",
+                  file=sys.stderr)
+            return 3
+        log.info((f"loaded {len(cfg['loaded'])} API key(s) from "
+                  f"{cfg['path']}") if cfg["found"]
+                 else "no API-key config file (shell variables only)",
+                 extra={"event": "config_file", "path": cfg["path"],
+                        "found": cfg["found"], "loaded": cfg["loaded"],
+                        "kept_from_environment":
+                            cfg["kept_from_environment"]})
 
     if not os.path.isfile(args.email_file):
         log.error("input file not found", extra={"event": "fatal",

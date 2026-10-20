@@ -104,6 +104,71 @@ Each skill folder follows the standard Agent Skill layout — a `SKILL.md` (YAML
 
 ## 🚀 Quick start
 
+### Easy installation (recommended)
+
+No virtual environment needed — `install` uses the Python you already have:
+
+```bash
+git clone https://github.com/oguzpamuk/phishHunter.git
+cd phishHunter
+
+python3 phishhunter.py install                  # requirements + private key config
+python3 phishhunter.py config set virustotal    # paste the key (hidden input)
+#   repeat for the keys you have: abuseipdb, otx, urlscan, hybrid_analysis, anthropic
+
+python3 phishhunter.py analyze examples/sample_phishing.eml --format text
+```
+
+That is all. Everyday commands:
+
+```bash
+python3 phishhunter.py analyze suspicious.eml --ai -o report.json --pretty
+python3 phishhunter.py pdf report.json -o report.pdf
+python3 phishhunter.py web            # web console on http://127.0.0.1:8787
+python3 phishhunter.py doctor         # Python, dependencies, which keys are set (names only)
+```
+
+| Command | What it does |
+|---|---|
+| `install [--venv] [--yara]` | Install `requirements.txt` into the current Python (or an isolated `.venv` with `--venv`) and create the private key config |
+| `config set NAME` / `unset NAME` | Store / clear one API key — hidden input, never echoed or saved in shell history |
+| `config show` / `path` / `fix-perms` | Which keys are set (no values), where the file is, repair its permissions |
+| `analyze EMAIL [options]` | Run the triage pipeline; every `triage_pipeline.py` option passes through, `--skills-root` is added for you |
+| `pdf REPORT.json` · `web` | PDF report · local web console |
+| `doctor` | Health check: Python, environment, dependencies, config safety, key status |
+| `run SCRIPT [args]` | Run any repo script with the same environment and keys |
+
+Good to know:
+
+- **Dependencies are optional.** The core analysis (parsing, headers, body,
+  IOCs, WHOIS, verdict, AI stages, web UI) is pure standard library.
+  `requests` only enables threat-intel lookups and `reportlab` PDF reports;
+  if they are missing the launcher says which feature is off and keeps going.
+- **Exit codes pass through** (`0` clean · `1` suspicious · `2` malicious ·
+  `3` fatal), so `phishhunter.py analyze` is CI-friendly.
+- Pure standard library launcher · Linux, macOS, Windows · Python 3.8+.
+
+#### Optional: isolated virtual environment
+
+Only if you want one (or if your OS Python refuses pip installs — Debian /
+Ubuntu / Homebrew "externally-managed-environment", PEP 668; `install` offers
+it automatically in that case):
+
+```bash
+python3 phishhunter.py install --venv         # creates .venv and installs into it
+```
+
+From then on every launcher command runs on `.venv` by itself — no
+`source .venv/bin/activate` — and it re-syncs when `requirements.txt`
+changes (e.g. after `git pull`). Delete `.venv` (or pass `--no-venv`) to go
+back to your normal Python. Without `--venv` the launcher **never** creates
+a virtual environment. If `python3-venv` is missing, a pip-less venv filled
+by your system pip is used instead.
+
+You can of course skip the launcher entirely — `pip install -r
+requirements.txt` and run the scripts directly (Option A below); the keys
+in the config file are still picked up.
+
 ### Option A — Standalone CLI (no Claude required)
 
 ```bash
@@ -111,7 +176,9 @@ git clone https://github.com/oguzpamuk/phishHunter.git
 cd phishHunter
 pip install -r requirements.txt          # only `requests`, for the intel stage
 
-# Export whichever intel API keys you have (all optional — missing ones are skipped)
+# API keys: store them once in the private config (read automatically) ...
+python3 phishhunter.py config set virustotal
+# ...or export them per shell (exported values win over the config file):
 export VT_API_KEY="..."
 export ABUSEIPDB_API_KEY="..."
 export OTX_API_KEY="..."
@@ -172,12 +239,11 @@ cd phishHunter
 # Optional — only if you want threat intel and PDF export
 pip install -r requirements.txt
 
-# Optional — export whichever intel keys you have (missing sources are skipped)
-export VT_API_KEY="..." ABUSEIPDB_API_KEY="..." OTX_API_KEY="..."
-export ANTHROPIC_API_KEY="..."          # only for the AI analyst toggle
+# Optional — keys from the private config are loaded at start-up
+python3 phishhunter.py config set virustotal      # repeat for the keys you have
 
 # Start the console
-python3 webui/app.py
+python3 webui/app.py              # or: python3 phishhunter.py web
 ```
 
 Then open **http://127.0.0.1:8787**.
@@ -491,6 +557,7 @@ Intel health is logged explicitly so a green-looking run can't hide a dead looku
 
 | Event | Level | Meaning |
 |---|---|---|
+| `config_file` | INFO / ERROR | which API-key config was used and which key **names** it provided; ERROR when an unsafe file was refused |
 | `intel_select` | INFO | how many IOCs were sent and which reserved / non-routable names were `excluded` |
 | `intel_keys` | INFO | which source keys are `configured` / `missing` (names only) |
 | `intel_coverage` | ERROR / WARNING / INFO | no source answered (`ERROR`, stage = `error`), some queries failed (`WARNING`, stage `ok (degraded)`), or only indicator rejections to note (`INFO`); carries per-source messages and the `coverage` counts |
@@ -562,6 +629,57 @@ report notes it and lowers its confidence accordingly.
 ## 🔑 API keys
 
 All keys are **optional** — sources without a key are skipped automatically and noted in the report.
+
+**Where to put them — a private config file outside the repository.**
+
+```bash
+python3 phishhunter.py config set virustotal    # hidden prompt, saved immediately
+python3 phishhunter.py config show              # which keys are set (never values)
+```
+
+The file lives in your user profile, **not** in the project folder, so it
+can never be committed, zipped together with the code or lost on a fresh
+clone:
+
+| OS | Location |
+|---|---|
+| Linux / macOS | `~/.config/phishhunter/config.ini` (or `$XDG_CONFIG_HOME/phishhunter/`) |
+| Windows | `%APPDATA%\phishhunter\config.ini` |
+| Custom | `--config PATH` or `PHISHHUNTER_CONFIG=PATH` |
+
+You can also edit it by hand (`python3 phishhunter.py config path`):
+
+```ini
+[intel]
+virustotal      = ...
+abuseipdb       =
+otx             = ...
+urlscan         =
+hybrid_analysis =
+
+[ai]
+anthropic       = ...
+# base_url      = https://your-gateway.example.org
+```
+
+| Protection | Behaviour |
+|---|---|
+| Private by construction | Created atomically with mode `600` in a `700` directory |
+| Refused when unsafe | Like OpenSSH: if other users can access the file, it is not yours, or its folder is writable by others, phishHunter **refuses to load it** and prints the fix (`python3 phishhunter.py config fix-perms`) |
+| Hidden input | `config set` uses a no-echo prompt; keys never land in shell history. Piping works too, for secret managers: `pass show vt \| python3 phishhunter.py config set virustotal` |
+| Never displayed | Only key **names** are printed or logged (`config_file` audit event); values never are |
+| Literal values | No `%` / `$` expansion, no command substitution |
+| Precedence | A variable already exported in the shell **wins** over the file (one-off overrides, CI secrets) |
+| Opt-out | `--no-config` on the launcher, pipeline and web UI |
+
+The file is not encrypted on purpose: the decryption key would have to live
+on the same machine, which protects nothing against someone who can already
+read your home directory, and a passphrase on every run defeats the purpose.
+File permissions plus full-disk encryption are the effective protection; an
+OS-keychain backend is a possible future option.
+
+`python3 phishhunter.py doctor` shows which keys are set and where each one
+came from (config file or shell).
 
 > **Keys are not enough on their own — they must also *work*.** The intel stage is judged by what actually answered, not by whether the call ran. If every source query fails (invalid key, network down, rate limit) the stage is marked **`error`**, the report and PDF say *"No threat-intel source returned data — `unknown` means unchecked, not clean"*, and confidence drops to `medium`. If only some queries fail, the stage stays `ok` but is flagged **degraded** (`WARNING` in the audit log, "partial" badge in the UI). Sources skipped purely because their key is unset are a configuration choice and are listed at `INFO`, never as failures. Two cases are deliberately **not** counted as failures: (1) names that can never exist on the internet — `.example`, `.test`, `.invalid`, `.localhost`, `.local`, `.internal`, `example.com/net/org` (RFC 2606/6761) — are never sent to intel or WHOIS and are listed as *"not sent"* in the report; (2) a source answering HTTP 400/422 **with a message that names the indicator as invalid, reserved, unresolvable or blocked** (e.g. *"Invalid domain"*, urlscan *"DNS Error - Could not resolve domain"*) has refused that indicator, which is an answer about the IOC, not an outage — it is shown as *rejected*. A 400 caused by a malformed request (e.g. a parameter validation error) stays a real failure. Error texts show the API's own message, not raw JSON. All IOCs and sources are queried concurrently, and each source gets the stage `--timeout` minus 30 s, so one slow lookup (e.g. a URL scan that never finishes) is recorded as that source's failure instead of discarding every other result. Check which keys the run saw with `grep intel_keys audit.jsonl` (key *names* only, never values).
 
@@ -704,6 +822,7 @@ API-compatible gateway (corporate proxy, LiteLLM, self-hosted relay).
 ```
 .
 ├── README.md
+├── phishhunter.py               # launcher: install · config · analyze · pdf · web · doctor · run
 ├── requirements.txt
 ├── .gitignore
 ├── skills/                      # 13 Agent Skills (SKILL.md + scripts/)
@@ -711,6 +830,7 @@ API-compatible gateway (corporate proxy, LiteLLM, self-hosted relay).
 │   │   └── scripts/
 │   │       ├── triage_pipeline.py
 │   │       ├── report_to_pdf.py #   ← JSON report → professional PDF
+│   │       ├── phishhunter_config.py # private API-key config (launcher, pipeline, web UI)
 │   │       └── ioc_extractor.py #   (bundled fallback)
 │   ├── email-parser/
 │   ├── email-header-analyzer/
