@@ -23,29 +23,29 @@ Give it a suspicious `.eml` or `.msg` file — get back a full SOC-style investi
                               ┌─────────────────────┐
                               │  1. email-parser    │  structured JSON
                               └──────────┬──────────┘  (headers, body, attachments)
-          ┌──────────────────┬──────────┼──────────┬──────────────────┐
-          ▼                  ▼          ▼           ▼                  ▼
- ┌────────────────┐ ┌────────────────┐  │  ┌────────────────┐ ┌────────────────────┐
- │ 2. email-      │ │ 3. email-      │  │  │ ✦ email-yara-  │ │ 4. ioc-extractor   │
- │    header-     │ │    anomaly-    │  │  │    scanner     │ │  IPs · domains     │
- │    analyzer    │ │    detector    │  │  │  (optional,    │ │  URLs · hashes     │
- │ SPF/DKIM/DMARC │ │ spam score,    │  │  │  --yara-rules) │ │  attachment SHA256 │
- │ spoofing,      │ │ brand          │  │  │ your rules vs. │ │                    │
- │ routing        │ │ impersonation  │  │  │ every layer    │ │                    │
- │                │ │ ✦ --ai-body:   │  │  │                │ │                    │
- │                │ │ any language   │  │  │                │ │                    │
- └───────┬────────┘ └───────┬────────┘  │  └───────┬────────┘ └─────────┬──────────┘
-         │                  │           │          │          ┌─────────┴─────────┐
-         │                  │           │          │          ▼                   ▼
-         │                  │           │          │  ┌────────────────┐ ┌──────────────┐
-         │                  │           │          │  │ 5. ioc-        │ │ 6. whois-    │
-         │                  │           │          │  │  orchestrator  │ │    lookup    │
-         │                  │           │          │  │ VirusTotal ·   │ │ registrar,   │
-         │                  │           │          │  │ AbuseIPDB ·    │ │ DOMAIN AGE,  │
-         │                  │           │          │  │ OTX · Hybrid · │ │ IP owner     │
-         │                  │           │          │  │ urlscan ∥      │ │              │
-         │                  │           │          │  └───────┬────────┘ └──────┬───────┘
-         └──────────────────┴───────────┴──────────┴──────────┴─────────────────┘
+          ┌──────────────────┬───────────┼──────────┬──────────────────┐
+          ▼                  ▼           ▼          ▼                  ▼
+ ┌────────────────┐ ┌────────────────┐   │ ┌────────────────┐ ┌────────────────────┐
+ │ 2. email-      │ │ 3. email-      │   │ │ ◊ email-yara-  │ │ 4. ioc-extractor   │
+ │    header-     │ │    anomaly-    │   │ │    scanner     │ │  IPs · domains     │
+ │    analyzer    │ │    detector    │   │ │  (optional,    │ │  URLs · hashes     │
+ │ SPF/DKIM/DMARC │ │ spam score,    │   │ │  --yara-rules) │ │  attachment SHA256 │
+ │ spoofing,      │ │ brand          │   │ │ your rules vs. │ │                    │
+ │ routing        │ │ impersonation  │   │ │ every layer    │ │                    │
+ │                │ │ ◊ --ai-body:   │   │ │                │ │                    │
+ │                │ │ any language   │   │ │                │ │                    │
+ └───────┬────────┘ └───────┬────────┘   │ └───────┬────────┘ └─────────┬──────────┘
+         │                  │            │         │          ┌─────────┴───────┐
+         │                  │            │         │          ▼                 ▼
+         │                  │            │         │  ┌────────────────┐ ┌──────────────┐
+         │                  │            │         │  │ 5. ioc-        │ │ 6. whois-    │
+         │                  │            │         │  │  orchestrator  │ │    lookup    │
+         │                  │            │         │  │ VirusTotal ·   │ │ registrar,   │
+         │                  │            │         │  │ AbuseIPDB ·    │ │ DOMAIN AGE,  │
+         │                  │            │         │  │ OTX · Hybrid · │ │ IP owner     │
+         │                  │            │         │  │ urlscan (||)   │ │              │
+         │                  │            │         │  └───────┬────────┘ └──────┬───────┘
+         └──────────────────┴────────────┴─────────┴──────────┴─────────────────┘
                                          │
                                          ▼
                               ┌─────────────────────┐
@@ -71,8 +71,8 @@ Give it a suspicious `.eml` or `.msg` file — get back a full SOC-style investi
    └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-Stages **2, 3, ✦ (YARA), and 4** run off the parsed email; **5 & 6** enrich
-the IOCs that stage 4 extracts. The **✦ YARA** stage is optional — it only
+Stages **2, 3, ◊ (YARA), and 4** run off the parsed email; **5 & 6** enrich
+the IOCs that stage 4 extracts. The **◊ YARA** stage is optional — it only
 runs when you pass `--yara-rules` — and a rule match feeds the verdict engine
 as one of its strongest signals.
 
