@@ -29,11 +29,11 @@ Give it a suspicious `.eml` or `.msg` file — get back a full SOC-style investi
  │ 2. email-      │ │ 3. email-      │   │ │ ◊ email-yara-  │ │ 4. ioc-extractor   │
  │    header-     │ │    anomaly-    │   │ │    scanner     │ │  IPs · domains     │
  │    analyzer    │ │    detector    │   │ │  (optional,    │ │  URLs · hashes     │
- │ SPF/DKIM/DMARC │ │ spam score,    │   │ │  --yara-rules) │ │  attachment SHA256 │
- │ spoofing,      │ │ brand          │   │ │ your rules vs. │ │                    │
+ │ SPF/DKIM/DMARC │ │ spam score,    │   │ │  --yara-rules) │ │  attachment hashes │
+ │ spoofing,      │ │ brand          │   │ │ your rules vs. │ │  QR codes · images │
  │ routing        │ │ impersonation  │   │ │ every layer    │ │                    │
- │                │ │ ◊ --ai-body:   │   │ │                │ │                    │
- │                │ │ any language   │   │ │                │ │                    │
+ │                │ │ ◊ --ai-body:   │   │ │                │ │ ◊ --ai-images:     │
+ │                │ │ any language   │   │ │                │ │ text in pictures   │
  └───────┬────────┘ └───────┬────────┘   │ └───────┬────────┘ └─────────┬──────────┘
          │                  │            │         │          ┌─────────┴───────┐
          │                  │            │         │          ▼                 ▼
@@ -49,14 +49,17 @@ Give it a suspicious `.eml` or `.msg` file — get back a full SOC-style investi
                                          │
                                          ▼
                               ┌─────────────────────┐
-                              │  7. VERDICT ENGINE  │  weighted 0–100 score
-                              │  malicious /        │  + explained signals
-                              │  suspicious / clean │  (YARA hit = strong signal)
+                              │  7. VERDICT ENGINE  │  RULE-BASED verdict: weighted
+                              │  malicious /        │  0–100 score + explained signals
+                              │  suspicious / clean │  (YARA, ◊ AI body & ◊ AI image
+                              │                     │   findings add points here)
                               └──────────┬──────────┘
                                          ▼  (optional --ai)
                               ┌─────────────────────┐
-                              │  8. LLM Analyst     │  Anthropic API assessment
-                              │     Assessment      │  + recommended actions
+                              │  8. ◊ LLM Analyst   │  AI ANALYST verdict: its own
+                              │     (2nd opinion)   │  verdict + confidence + summary
+                              │                     │  from ALL evidence; shown next
+                              │                     │  to 7 — never changes the score
                               └──────────┬──────────┘
                                          ▼  (optional)
                               ┌─────────────────────┐
@@ -72,9 +75,20 @@ Give it a suspicious `.eml` or `.msg` file — get back a full SOC-style investi
 ```
 
 Stages **2, 3, ◊ (YARA), and 4** run off the parsed email; **5 & 6** enrich
-the IOCs that stage 4 extracts. The **◊ YARA** stage is optional — it only
-runs when you pass `--yara-rules` — and a rule match feeds the verdict engine
-as one of its strongest signals.
+the IOCs that stage 4 extracts. **◊** marks optional stages — they run only
+when you ask for them:
+
+| Optional stage | Flag | Feeds | Effect on the score |
+|---|---|---|---|
+| YARA scan | `--yara-rules` | verdict engine | a rule match is one of the strongest signals |
+| AI body analysis | `--ai-body` | verdict engine | reads the body in any language; the higher of the rule-based and AI body points counts (never both) |
+| AI image analysis | `--ai-images` | verdict engine | reads text, fake login screens and brands inside images and QR codes; replaces the "image-only email" blind-spot penalty |
+| LLM analyst | `--ai` | report only | a second, independent verdict with confidence and a short summary, based on every finding including the two AI stages above; **never alters the rule-based score** |
+
+So phishHunter has **three AI stages**: two produce evidence that is scored,
+and one reviews everything and gives a second opinion. All three use the
+Anthropic API (`ANTHROPIC_API_KEY`), treat email content as untrusted input,
+and report prompt-injection attempts.
 
 Every stage is **fail-soft**: missing API keys, no network, or an absent skill never aborts the run — the report records what was skipped and the verdict confidence is lowered accordingly.
 
