@@ -54,6 +54,10 @@ python3 scripts/triage_pipeline.py suspicious.msg --format text
 # Fully offline (no reputation APIs, no WHOIS)
 python3 scripts/triage_pipeline.py mail.eml --skip-intel --skip-whois --format text
 
+# Resource limits for untrusted input: refuse files above 25 MB before
+# parsing, cap memory / CPU of the pipeline and every sub-skill (POSIX)
+python3 scripts/triage_pipeline.py mail.eml --max-email-mb 25 --max-memory-mb 2048 --max-cpu-seconds 600
+
 # Restrict intel sources, detonate attachments in sandboxes (asks nothing —
 # ALWAYS confirm with the user first, uploads are community-visible!)
 python3 scripts/triage_pipeline.py mail.eml --sources vt,otx --upload

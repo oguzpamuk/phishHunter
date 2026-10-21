@@ -678,8 +678,15 @@ def main(argv=None):
         # ValueError: bad magic; struct.error/IndexError: truncated/corrupt container
         print(f"ERROR: unsupported or corrupt file: {exc}", file=sys.stderr)
         return 2
+    except MemoryError:
+        # Raised when a memory limit (e.g. the pipeline's --max-memory-mb)
+        # is reached; MemoryError carries no message of its own.
+        print("ERROR: out of memory while parsing - the email is too large "
+              "for the configured memory limit", file=sys.stderr)
+        return 3
     except Exception as exc:  # pragma: no cover — safety net
-        print(f"ERROR: unexpected failure: {exc}", file=sys.stderr)
+        print(f"ERROR: unexpected failure: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
         return 3
 
     # ---- Serialize and emit ---------------------------------------------------

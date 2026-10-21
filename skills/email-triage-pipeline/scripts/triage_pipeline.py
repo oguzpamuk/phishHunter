@@ -65,6 +65,12 @@ Stage control:
                           WARNING: uploaded files become community-visible.
     --max-urls N          Max URLs sent to reputation lookups (default 10).
     --max-domains N       Max domains sent to reputation/WHOIS (default 10).
+    --max-email-mb N      Refuse input files above N MB before parsing
+                          (default 50; 0 = no limit).
+    --max-memory-mb N     Memory limit for the pipeline and every sub-skill
+                          it starts (POSIX; default 0 = none). A "MIME bomb"
+                          then fails one stage instead of the machine.
+    --max-cpu-seconds N   CPU-time limit per process (POSIX; default none).
     --timeout N           Per-stage subprocess timeout in seconds (default 600).
                           The intel stage passes N-30 to the orchestrator as
                           its per-source timeout, so a slow source fails on
@@ -339,6 +345,36 @@ def candidate_roots(cli_root):
         if r and os.path.isdir(r) and r not in seen:
             seen.add(r)
             yield r
+
+
+def apply_resource_limits(max_memory_mb, max_cpu_seconds):
+    """Cap memory and CPU for this process and every sub-skill it starts.
+
+    Input : max_memory_mb   - address-space limit in MB (0 = unchanged)
+            max_cpu_seconds - CPU-time limit in seconds (0 = unchanged)
+    Output: list of human-readable limits applied (empty when none).
+    Child processes inherit the limits, so a malformed or deliberately
+    huge email (e.g. a "MIME bomb") stops the stage that chokes on it
+    instead of exhausting the machine. POSIX only; on Windows the request
+    is ignored and reported.
+    """
+    try:
+        import resource
+    except ImportError:
+        return ["resource limits not supported on this platform"]
+    applied = []
+    for flag, value, unit in ((getattr(resource, "RLIMIT_AS", None),
+                               max_memory_mb * 1024 * 1024, "MB memory"),
+                              (resource.RLIMIT_CPU, max_cpu_seconds,
+                               "s CPU")):
+        if not value or flag is None:
+            continue
+        soft, hard = resource.getrlimit(flag)
+        new = value if hard == resource.RLIM_INFINITY else min(value, hard)
+        resource.setrlimit(flag, (new, hard))
+        shown = new // (1024 * 1024) if unit.endswith("memory") else new
+        applied.append(f"{shown} {unit}")
+    return applied
 
 
 def find_script(skill_name, cli_root):
@@ -2236,6 +2272,15 @@ def main(argv=None) -> int:
     ap.add_argument("--max-urls", type=int, default=10)
     ap.add_argument("--max-domains", type=int, default=10)
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--max-email-mb", type=float, default=50,
+                    help="refuse input files larger than this many MB "
+                         "before parsing (default 50, 0 = no limit)")
+    ap.add_argument("--max-memory-mb", type=int, default=0,
+                    help="memory limit in MB for the pipeline and every "
+                         "sub-skill it runs (POSIX; default 0 = none)")
+    ap.add_argument("--max-cpu-seconds", type=int, default=0,
+                    help="CPU-time limit per process in seconds (POSIX; "
+                         "default 0 = none)")
     ap.add_argument("--ai", action="store_true",
                     help="add an Anthropic-API LLM assessment")
     ap.add_argument("--ai-body", action="store_true",
@@ -2316,6 +2361,22 @@ def main(argv=None) -> int:
                         "found": cfg["found"], "loaded": cfg["loaded"],
                         "kept_from_environment":
                             cfg["kept_from_environment"]})
+
+    limits = apply_resource_limits(args.max_memory_mb, args.max_cpu_seconds)
+    if limits:
+        log.info("resource limits: " + ", ".join(limits),
+                 extra={"event": "resource_limits", "limits": limits})
+
+    if os.path.isfile(args.email_file) and args.max_email_mb > 0:
+        size_mb = os.path.getsize(args.email_file) / (1024 * 1024)
+        if size_mb > args.max_email_mb:
+            msg = (f"input is {size_mb:.1f} MB, larger than the "
+                   f"{args.max_email_mb:g} MB limit (--max-email-mb)")
+            log.error(msg, extra={"event": "fatal", "reason":
+                                  "input_too_large",
+                                  "input_file": args.email_file})
+            print(f"error: {msg}", file=sys.stderr)
+            return 3
 
     if not os.path.isfile(args.email_file):
         log.error("input file not found", extra={"event": "fatal",

@@ -31,6 +31,9 @@ RUNNING
                          [--config PATH | --no-config]
                          [--allow-host NAME[:PORT] ...] [--max-parallel 2]
                          [--stage-timeout 300] [--analysis-timeout 3600]
+                         [--max-email-mb 50] [--read-timeout 30]
+                         [--upload-timeout 120] [--max-connections 64]
+                         [--max-memory-mb 4096]
 
     Then open  http://127.0.0.1:8787
 
@@ -52,7 +55,15 @@ SECURITY MODEL (local, single-user console - no login)
     * Every page gets a strict Content-Security-Policy with a per-response
       script nonce; API values are HTML-escaped before rendering.
     * webui/data is private (umask 077, dirs 700, files 600).
-    * At most --max-parallel analyses run at once (HTTP 429 otherwise).
+    * At most --max-parallel analyses run at once (HTTP 429 otherwise); a
+      slot is taken only after an upload has fully arrived and validated.
+    * Uploads are streamed to webui/data/incoming and parsed from disk
+      (memory does not grow with the upload); emails above --max-email-mb
+      get HTTP 413.
+    * Connections silent for --read-timeout, or uploads slower than
+      --upload-timeout, are dropped (408); above --max-connections new
+      connections get 503.
+    * Each analysis runs with --max-memory-mb and a CPU limit.
     Binding beyond loopback (--host 0.0.0.0) has NO authentication: put an
     authenticated reverse proxy in front and pass its name with --allow-host.
 
@@ -79,7 +90,8 @@ HTTP API (all JSON unless noted)
                                   ai         ("1" to add the LLM analyst)
                                 → {"id": "<analysis id>"}
                                   400 bad input · 403 cross-site / wrong
-                                  Host · 429 too many running analyses
+                                  Host · 408 too slow · 413 too large ·
+                                  429 too many running analyses
     GET  /api/analysis/{id}/progress
                                 → {"status": "running|done|error",
                                    "stages": [ {stage,status,duration_s,
@@ -108,13 +120,17 @@ import argparse
 import datetime as dt
 import json
 import mimetypes
+import mmap
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -129,6 +145,8 @@ DATA_DIR = os.path.join(HERE, "data")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 REPORT_DIR = os.path.join(DATA_DIR, "reports")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
+# Uploads are streamed here first and deleted once handled.
+INCOMING_DIR = os.path.join(DATA_DIR, "incoming")
 DB_PATH = os.path.join(DATA_DIR, "phishhunter.db")
 TEMPLATE_DIR = os.path.join(HERE, "templates")
 STATIC_DIR = os.path.join(HERE, "static")
@@ -169,7 +187,32 @@ MAX_PARALLEL = 2
 STAGE_TIMEOUT = 300          # seconds per pipeline stage (--timeout)
 ANALYSIS_TIMEOUT = 3600      # hard limit for one whole analysis
 _slots = threading.BoundedSemaphore(MAX_PARALLEL)
-MAX_UPLOAD = 50 * 1024 * 1024
+
+# Upload / connection limits (all overridable on the command line).
+#   MAX_EMAIL_MB    - largest email accepted; also passed to the pipeline.
+#   READ_TIMEOUT    - seconds a connection may stay silent (headers or body)
+#                     before it is dropped (socket timeout on every read).
+#   UPLOAD_TIMEOUT  - total seconds allowed to receive one upload, so a
+#                     client trickling a byte at a time cannot hold a
+#                     connection forever.
+#   MAX_CONNECTIONS - concurrent connections; extra ones get HTTP 503 and
+#                     are closed, which bounds threads and memory.
+#   MAX_MEMORY_MB / MAX_CPU_SECONDS - resource limits for every analysis
+#                     process (passed to the pipeline, which applies them
+#                     to itself and to all of its sub-skills).
+MAX_EMAIL_MB = 50
+READ_TIMEOUT = 30
+UPLOAD_TIMEOUT = 120
+MAX_CONNECTIONS = 64
+MAX_MEMORY_MB = 4096
+MAX_CPU_SECONDS = 1800
+_conn_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+# Multipart framing allowance on top of the email itself (form fields,
+# headers, an optional YARA rules file).
+MAX_FORM_EXTRA = 5 * 1024 * 1024
+MAX_FORM_FIELDS = 16
+MAX_FIELD_TEXT = 1024
+CHUNK = 64 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +247,14 @@ def secure_data_dir():
 
 def init_db():
     """Create private data dirs and the analyses table on first run."""
-    for d in (DATA_DIR, UPLOAD_DIR, REPORT_DIR, LOG_DIR):
+    for d in (DATA_DIR, UPLOAD_DIR, REPORT_DIR, LOG_DIR, INCOMING_DIR):
         os.makedirs(d, mode=0o700, exist_ok=True)
+    # Leftovers of uploads interrupted by a crash or restart.
+    for name in os.listdir(INCOMING_DIR):
+        try:
+            os.unlink(os.path.join(INCOMING_DIR, name))
+        except OSError:
+            pass
     with db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS analyses (
@@ -271,6 +320,9 @@ def run_analysis(analysis_id, email_path, options):
            "-o", report_path,
            "--log-file", log_path, "--quiet",
            "--timeout", str(STAGE_TIMEOUT),
+           "--max-email-mb", str(MAX_EMAIL_MB),
+           "--max-memory-mb", str(MAX_MEMORY_MB),
+           "--max-cpu-seconds", str(MAX_CPU_SECONDS),
            # The server loaded the key config once at start-up and the child
            # inherits os.environ; stop the pipeline re-reading it so the
            # server's --config / --no-config choice holds.
@@ -385,39 +437,117 @@ def read_progress(analysis_id):
 
 
 # ---------------------------------------------------------------------------
-# Minimal multipart/form-data parser (stdlib only, no cgi module — it was
-# removed in Python 3.13). Handles the small forms this UI submits.
+# Uploads: streamed to disk, parsed without loading them into memory
 # ---------------------------------------------------------------------------
-def parse_multipart(body, content_type):
-    """Parse a multipart/form-data request body.
+class UploadError(Exception):
+    """An upload that cannot be accepted. .code is the HTTP status."""
 
-    Input : body         — raw request bytes
-            content_type — the Content-Type header (contains boundary=)
-    Output: dict field_name -> {"filename": str|None, "data": bytes}
-            Text fields have filename=None and UTF-8 decodable data.
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def receive_body(rfile, length, dest_fd):
+    """Copy exactly `length` request-body bytes to a file, in chunks.
+
+    Input : rfile   - the request stream (its socket has READ_TIMEOUT set)
+            length  - Content-Length, already checked against the limit
+            dest_fd - open file descriptor of a private temporary file
+    Output: None. Memory use is one CHUNK regardless of the upload size.
+    Raises: UploadError(408) when the client is silent for READ_TIMEOUT or
+            the whole upload takes longer than UPLOAD_TIMEOUT;
+            UploadError(400) when the connection closes early.
+    read1() returns whatever one socket read delivers, so the overall
+    deadline is checked even for a client that trickles bytes slowly.
+    """
+    deadline = time.monotonic() + UPLOAD_TIMEOUT
+    remaining = length
+    while remaining > 0:
+        if time.monotonic() > deadline:
+            raise UploadError(408, f"upload took longer than "
+                                   f"{UPLOAD_TIMEOUT}s")
+        try:
+            chunk = rfile.read1(min(CHUNK, remaining))
+        except (socket.timeout, TimeoutError):
+            raise UploadError(408, f"client sent nothing for "
+                                   f"{READ_TIMEOUT}s") from None
+        if not chunk:
+            raise UploadError(400, "connection closed before the upload "
+                                   "was complete")
+        os.write(dest_fd, chunk)
+        remaining -= len(chunk)
+
+
+def parse_multipart_file(path, content_type):
+    """Locate the parts of a multipart/form-data body stored in a file.
+
+    Input : path         - file holding the raw request body
+            content_type - the Content-Type header (contains boundary=)
+    Output: dict field_name -> {"filename": str|None,
+                                "start": int, "end": int}
+            start/end are byte offsets of the part's data in the file, so
+            callers copy or read only what they need (see copy_part /
+            read_part_text) - the body is never loaded into memory.
+    Raises: UploadError(400) for a malformed body or too many fields.
     """
     m = re.search(r'boundary="?([^";]+)"?', content_type or "")
     if not m:
-        return {}
-    boundary = b"--" + m.group(1).encode()
+        raise UploadError(400, "multipart boundary missing")
+    delim = b"--" + m.group(1).encode("latin-1", "replace")
     fields = {}
-    for part in body.split(boundary):
-        part = part.strip(b"\r\n")
-        if not part or part == b"--":
-            continue
-        if b"\r\n\r\n" not in part:
-            continue
-        head, data = part.split(b"\r\n\r\n", 1)
-        head_text = head.decode("utf-8", errors="replace")
-        name_m = re.search(r'name="([^"]+)"', head_text)
-        if not name_m:
-            continue
-        file_m = re.search(r'filename="([^"]*)"', head_text)
-        fields[name_m.group(1)] = {
-            "filename": file_m.group(1) if file_m else None,
-            "data": data,
-        }
+    with open(path, "rb") as fh:
+        if os.fstat(fh.fileno()).st_size == 0:
+            raise UploadError(400, "empty body")
+        with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            pos = mm.find(delim)
+            while pos != -1:
+                start = pos + len(delim)
+                if mm[start:start + 2] == b"--":          # closing delimiter
+                    break
+                nxt = mm.find(b"\r\n" + delim, start)
+                if nxt == -1:
+                    raise UploadError(400, "multipart body is truncated")
+                head_end = mm.find(b"\r\n\r\n", start, nxt)
+                if head_end == -1 or head_end - start > 8192:
+                    raise UploadError(400, "malformed multipart part")
+                head = mm[start:head_end].decode("utf-8", "replace")
+                name_m = re.search(r'name="([^"]+)"', head)
+                if name_m:
+                    if len(fields) >= MAX_FORM_FIELDS:
+                        raise UploadError(400, "too many form fields")
+                    file_m = re.search(r'filename="([^"]*)"', head)
+                    fields[name_m.group(1)] = {
+                        "filename": file_m.group(1) if file_m else None,
+                        "start": head_end + 4, "end": nxt}
+                pos = nxt + 2
     return fields
+
+
+def read_part_text(path, part):
+    """Input: body file, part. Output: the part as text (max 1 KB)."""
+    size = min(part["end"] - part["start"], MAX_FIELD_TEXT)
+    with open(path, "rb") as fh:
+        fh.seek(part["start"])
+        return fh.read(size).decode("utf-8", "replace")
+
+
+def copy_part(path, part, dest):
+    """Copy one part's bytes from the body file to `dest`, in chunks.
+
+    Input : path (body file), part (from parse_multipart_file), dest path.
+    Output: number of bytes written. The destination is created 0600.
+    """
+    remaining = part["end"] - part["start"]
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with open(path, "rb") as src, os.fdopen(fd, "wb") as out:
+        src.seek(part["start"])
+        while remaining > 0:
+            chunk = src.read(min(CHUNK, remaining))
+            if not chunk:
+                break
+            out.write(chunk)
+            remaining -= len(chunk)
+    return part["end"] - part["start"]
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +639,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             return self._post()
         except Exception:
-            return self._json({"error": "internal error"}, 500)
+            try:
+                return self._json({"error": "internal error"}, 500)
+            except OSError:
+                return None
 
     def _get(self):
         url = urlparse(self.path)
@@ -564,75 +697,107 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             return self._json({"error": "invalid Content-Length"}, 400)
-        if length <= 0 or length > MAX_UPLOAD:          # 50 MB upload cap
-            return self._json({"error": "missing or oversized body"}, 400)
-        if not _slots.acquire(blocking=False):
-            return self._json({"error": f"{MAX_PARALLEL} analyses are "
-                               "already running - try again shortly"}, 429)
-        started = False
+        limit = MAX_EMAIL_MB * 1024 * 1024 + MAX_FORM_EXTRA
+        if length <= 0:
+            return self._json({"error": "empty request"}, 400)
+        if length > limit:
+            self.close_connection = True
+            return self._json({"error": f"upload larger than the "
+                               f"{MAX_EMAIL_MB} MB limit"}, 413)
+
+        # 1. Receive the whole body into a private temporary file. The
+        #    analysis slot is NOT taken yet: a slow or stalled client can
+        #    hold only its own connection, never the analysis capacity.
+        fd, body_path = tempfile.mkstemp(prefix="upload-", dir=INCOMING_DIR)
         try:
-            started = self._start_analysis(self.rfile.read(length))
-            return started
+            try:
+                receive_body(self.rfile, length, fd)
+            finally:
+                os.close(fd)
+            fields = parse_multipart_file(body_path,
+                                          self.headers.get("Content-Type"))
+            # 2. Validate, then 3. take a slot and start the analysis.
+            return self._start_analysis(body_path, fields)
+        except UploadError as e:
+            if e.code in (408, 413):
+                self.close_connection = True
+            try:
+                return self._json({"error": str(e)}, e.code)
+            except OSError:          # client already gone (timeout)
+                return None
         finally:
-            if not started:
-                _slots.release()
+            try:
+                os.unlink(body_path)
+            except OSError:
+                pass
 
-    def _start_analysis(self, body):
-        """Store the upload and start the pipeline thread.
+    def _start_analysis(self, body_path, fields):
+        """Validate a received upload, store it and start the pipeline.
 
-        Output: the response (truthy) when a thread was started - the thread
-                then owns the concurrency slot; False after an error reply.
+        Input : body_path - temporary file holding the request body
+                fields    - parse_multipart_file() result
+        Output: response sent; True when an analysis thread was started
+                (the thread then owns its concurrency slot).
         """
-        fields = parse_multipart(body, self.headers.get("Content-Type"))
-
         email = fields.get("email")
         if not email or not email.get("filename"):
-            self._json({"error": "an .eml or .msg file is required"}, 400)
-            return False
+            raise UploadError(400, "an .eml or .msg file is required")
         fname = sanitize_filename(email["filename"])
         if not fname.lower().endswith((".eml", ".msg")):
-            self._json(
-                {"error": "unsupported file type — upload .eml or .msg"}, 400)
-            return False
-
-        analysis_id = uuid.uuid4().hex
-        adir = os.path.join(UPLOAD_DIR, analysis_id)
-        os.makedirs(adir, exist_ok=True)
-        email_path = os.path.join(adir, fname)
-        with open(email_path, "wb") as f:
-            f.write(email["data"])
-
-        # Optional YARA rules upload — stored next to the email.
-        yara_path = None
-        yara = fields.get("yara_rules")
-        if yara and yara.get("filename"):
-            yname = sanitize_filename(yara["filename"])
-            if yname.lower().endswith((".yar", ".yara")):
-                yara_path = os.path.join(adir, yname)
-                with open(yara_path, "wb") as f:
-                    f.write(yara["data"])
+            raise UploadError(400, "unsupported file type - upload .eml "
+                                   "or .msg")
+        if email["end"] - email["start"] > MAX_EMAIL_MB * 1024 * 1024:
+            raise UploadError(413, f"email larger than the {MAX_EMAIL_MB} "
+                                   f"MB limit")
+        if email["end"] <= email["start"]:
+            raise UploadError(400, "the email file is empty")
 
         def flag(name):
             fld = fields.get(name)
-            return bool(fld and fld["data"].decode("utf-8",
-                                                   "replace").strip() == "1")
+            return bool(fld and read_part_text(body_path, fld).strip() == "1")
 
-        options = {"skip_intel": flag("skip_intel"),
-                   "skip_whois": flag("skip_whois"),
-                   "ai": flag("ai"), "ai_body": flag("ai_body"),
-                   "ai_images": flag("ai_images"),
-                   "share_urls": flag("share_urls"), "yara_rules": yara_path}
+        # Only a complete, valid upload reaches this point - now take an
+        # analysis slot.
+        if not _slots.acquire(blocking=False):
+            raise UploadError(429, f"{MAX_PARALLEL} analyses are already "
+                                   "running - try again shortly")
+        try:
+            analysis_id = uuid.uuid4().hex
+            adir = os.path.join(UPLOAD_DIR, analysis_id)
+            os.makedirs(adir, mode=0o700, exist_ok=True)
+            email_path = os.path.join(adir, fname)
+            copy_part(body_path, email, email_path)
 
-        with db() as conn:
-            conn.execute(
-                "INSERT INTO analyses (id, filename, created_utc, status) "
-                "VALUES (?,?,?,?)",
-                (analysis_id, fname,
-                 dt.datetime.now(dt.timezone.utc).isoformat(), "running"))
+            # Optional YARA rules upload - stored next to the email.
+            yara_path = None
+            yara = fields.get("yara_rules")
+            if yara and yara.get("filename"):
+                yname = sanitize_filename(yara["filename"])
+                if yname.lower().endswith((".yar", ".yara")) and \
+                        yara["end"] > yara["start"]:
+                    yara_path = os.path.join(adir, yname)
+                    copy_part(body_path, yara, yara_path)
 
-        threading.Thread(target=run_analysis,
-                         args=(analysis_id, email_path, options),
-                         daemon=True).start()
+            options = {"skip_intel": flag("skip_intel"),
+                       "skip_whois": flag("skip_whois"),
+                       "ai": flag("ai"), "ai_body": flag("ai_body"),
+                       "ai_images": flag("ai_images"),
+                       "share_urls": flag("share_urls"),
+                       "yara_rules": yara_path}
+
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO analyses (id, filename, created_utc, status) "
+                    "VALUES (?,?,?,?)",
+                    (analysis_id, fname,
+                     dt.datetime.now(dt.timezone.utc).isoformat(), "running"))
+
+            threading.Thread(target=run_analysis,
+                             args=(analysis_id, email_path, options),
+                             daemon=True).start()
+        except BaseException:
+            _slots.release()
+            raise
         self._json({"id": analysis_id})
         return True
 
@@ -696,6 +861,40 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"items": items})
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a cap on concurrent connections.
+
+    Each connection normally gets its own thread with no upper bound, so a
+    client opening thousands of idle sockets could exhaust threads and
+    memory. Above MAX_CONNECTIONS a connection receives "503 Service
+    Unavailable" and is closed immediately; idle connections are dropped
+    after READ_TIMEOUT by the handler's socket timeout.
+    """
+    daemon_threads = True
+
+    def process_request(self, request, client_address):
+        if not _conn_slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n"
+                                b"Content-Length: 0\r\n"
+                                b"Connection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            _conn_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            _conn_slots.release()
+
+
 def build_allowed_hosts(bind_host, port, extra):
     """
     Input : bind_host (--host), port (--port), extra (--allow-host values,
@@ -735,7 +934,9 @@ def build_allowed_hosts(bind_host, port, extra):
 
 def main():
     global SKILLS_ROOT, ALLOWED_HOSTS, MAX_PARALLEL, _slots, \
-        STAGE_TIMEOUT, ANALYSIS_TIMEOUT
+        STAGE_TIMEOUT, ANALYSIS_TIMEOUT, MAX_EMAIL_MB, READ_TIMEOUT, \
+        UPLOAD_TIMEOUT, MAX_CONNECTIONS, _conn_slots, MAX_MEMORY_MB, \
+        MAX_CPU_SECONDS
     ap = argparse.ArgumentParser(description="phishHunter Web UI")
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (default 127.0.0.1 — keep local; put "
@@ -762,6 +963,20 @@ def main():
     ap.add_argument("--analysis-timeout", type=int, default=3600,
                     help="hard limit for one analysis in seconds "
                          "(default 3600)")
+    ap.add_argument("--max-email-mb", type=int, default=50,
+                    help="largest email accepted, in MB (default 50)")
+    ap.add_argument("--read-timeout", type=int, default=30,
+                    help="seconds a connection may stay silent before it "
+                         "is dropped (default 30)")
+    ap.add_argument("--upload-timeout", type=int, default=120,
+                    help="total seconds allowed to receive one upload "
+                         "(default 120)")
+    ap.add_argument("--max-connections", type=int, default=64,
+                    help="concurrent connections; extra ones get HTTP 503 "
+                         "(default 64)")
+    ap.add_argument("--max-memory-mb", type=int, default=4096,
+                    help="memory limit per analysis process in MB, 0 = none "
+                         "(default 4096; POSIX only)")
     args = ap.parse_args()
 
     # Everything the console writes (uploads, reports, logs, the index -
@@ -773,6 +988,17 @@ def main():
     _slots = threading.BoundedSemaphore(MAX_PARALLEL)
     STAGE_TIMEOUT = max(30, args.stage_timeout)
     ANALYSIS_TIMEOUT = max(STAGE_TIMEOUT, args.analysis_timeout)
+    MAX_EMAIL_MB = max(1, args.max_email_mb)
+    READ_TIMEOUT = max(1, args.read_timeout)
+    UPLOAD_TIMEOUT = max(READ_TIMEOUT, args.upload_timeout)
+    MAX_CONNECTIONS = max(4, args.max_connections)
+    _conn_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+    MAX_MEMORY_MB = max(0, args.max_memory_mb)
+    MAX_CPU_SECONDS = ANALYSIS_TIMEOUT
+    # Every connection's socket gets this timeout: silent clients (idle
+    # sockets, stalled headers or bodies) are dropped instead of holding a
+    # thread forever.
+    Handler.timeout = READ_TIMEOUT
     if args.skills_root:
         SKILLS_ROOT = os.path.abspath(args.skills_root)
 
@@ -803,7 +1029,7 @@ def main():
         print(f"error: pipeline not found at {PIPELINE}", file=sys.stderr)
         sys.exit(1)
     init_db()
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    server = BoundedThreadingHTTPServer((args.host, args.port), Handler)
     print(f"phishHunter Web UI  →  http://{args.host}:{args.port}")
     print(f"  skills root : {SKILLS_ROOT}")
     print(f"  data dir    : {DATA_DIR}  (private: 700/600)")

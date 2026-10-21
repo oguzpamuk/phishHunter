@@ -260,7 +260,13 @@ Useful flags:
 python3 webui/app.py --port 9000          # use a port other than the default 8787
 python3 webui/app.py --skills-root /path/to/skills   # non-standard skill location
 python3 webui/app.py --max-parallel 4     # analyses running at once (default 2)
+python3 webui/app.py --max-email-mb 25    # largest accepted email (default 50)
 ```
+
+Other limits, with their defaults: `--read-timeout 30` (seconds a connection
+may stay silent), `--upload-timeout 120` (total time to receive one upload),
+`--max-connections 64`, `--max-memory-mb 4096` (per analysis process),
+`--stage-timeout 300`, `--analysis-timeout 3600`.
 
 The server prints its URL, the skills root it resolved, and its data directory
 on startup. Stop it with `Ctrl-C`. Everything it writes — uploads, JSON
@@ -314,7 +320,10 @@ rules reached different conclusions:
 > requests addressed to `127.0.0.1`, `localhost` or `[::1]` (against DNS
 > rebinding), accepts uploads only from its own page (against CSRF), escapes
 > everything it displays and sends a strict Content-Security-Policy, and runs
-> at most `--max-parallel` analyses at once. To reach it from other machines,
+> at most `--max-parallel` analyses at once. Uploads are streamed to disk
+> (memory use does not grow with the file size), silent or very slow
+> connections are dropped, an analysis slot is only taken once an upload has
+> fully arrived, and every analysis runs with a memory and CPU limit. To reach it from other machines,
 > put it behind a reverse proxy that requires login, start it with
 > `--host 0.0.0.0` and pass the proxy's name with `--allow-host`.
 >
