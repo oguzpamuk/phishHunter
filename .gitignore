@@ -19,7 +19,9 @@ logs/
 *.msg
 !examples/*.msg
 
-# API keys / environment files
+# API keys / secrets. phishHunter keeps keys OUTSIDE the repository
+# (~/.config/phishhunter/config.ini); these rules are a safety net in case a
+# key file is ever placed here by hand (e.g. --config ./config.ini).
 .env
 .env.*
 *.key
