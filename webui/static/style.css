@@ -225,7 +225,8 @@ label.check { display: flex; gap: 8px; align-items: center;
           padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
 .signal:last-child { border-bottom: none; }
 .signal .pts { font-family: var(--mono); font-weight: 600; color: var(--suspicious); }
-.signal .code { font-family: var(--mono); color: var(--ink); }
+.signal .code { font-family: var(--mono); color: var(--ink); min-width: 0;
+                overflow-wrap: anywhere; }   /* long finding codes wrap */
 .signal .why { color: var(--muted); }
 .kv { display: grid; grid-template-columns: 160px 1fr; gap: 6px 16px; font-size: 14px; }
 .kv .k { color: var(--faint); }

@@ -321,10 +321,21 @@ stage audit trail:
 ![Analysis report](docs/screenshots/report-dual-verdict.png)
 
 **History** — filter by verdict or by **AI disagreement**, and search by
-filename. The AI column carries a marker on every run where the model and the
-rules reached different conclusions:
+filename; admins can delete an analysis from here. The AI column carries a
+marker on every run where the model and the rules reached different
+conclusions:
 
 ![Analysis history](docs/screenshots/history-ai-disagreements.png)
+
+**Settings** (admin) — automatic deletion, deleting all analyses, users and
+roles, and the audit trail:
+
+![Settings](docs/screenshots/settings.png)
+
+**Read-only view** — the same report for a read-only user: verdicts, signals
+and findings stay, the email content is hidden on the server:
+
+![Read-only report](docs/screenshots/report-readonly.png)
 
 > The analyst commentary in these screenshots is illustrative — written to
 > match what the evidence in each sample supports — because the sample emails
