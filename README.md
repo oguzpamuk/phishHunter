@@ -252,7 +252,21 @@ python3 easy_install.py --keys
 python3 webui/app.py
 ```
 
-Then open **http://127.0.0.1:8787**.
+Then open **http://127.0.0.1:8787** and log in as `admin`. On the first start
+the server creates that account and prints a one-time password in the console;
+you choose your own password at the first login. Forgot it? Stop the server and
+run `python3 webui/app.py --reset-admin` for a new one-time password.
+
+There are two roles:
+
+| Role | Can do |
+|---|---|
+| **admin** | Everything: full reports, Settings (retention, users, deleting analyses, audit trail) |
+| **read-only** | Start analyses and read every report, but **not the email content**: the subject, recipients, display names, quoted body text, text read from images and raw headers are hidden, addresses show only `***@domain`, URLs are shown without their query string, and other people's upload file names are replaced with `email-<id>`. This is done on the server, so the hidden data never reaches the browser |
+
+Admins add users on the Settings page; each new user gets a one-time password
+to change at the first login. After 5 wrong passwords in 15 minutes the user
+name and the client address are locked for 15 minutes.
 
 Useful flags:
 
@@ -261,6 +275,7 @@ python3 webui/app.py --port 9000          # use a port other than the default 87
 python3 webui/app.py --skills-root /path/to/skills   # non-standard skill location
 python3 webui/app.py --max-parallel 4     # analyses running at once (default 2)
 python3 webui/app.py --max-email-mb 25    # largest accepted email (default 50)
+python3 webui/app.py --reset-admin        # new one-time password for "admin", then exit
 ```
 
 Other limits, with their defaults: `--read-timeout 30` (seconds a connection
@@ -270,15 +285,18 @@ may stay silent), `--upload-timeout 120` (total time to receive one upload),
 
 The server prints its URL, the skills root it resolved, and its data directory
 on startup. Stop it with `Ctrl-C`. Everything it writes — uploads, JSON
-reports, audit logs, and the SQLite index — lives under `webui/data/`; delete
-that folder to reset the console to a clean state.
+reports, audit logs, users, and the SQLite index — lives under `webui/data/`;
+delete that folder to reset the console to a clean state (a new admin
+password is printed on the next start).
 
 | Page | What it does |
 |---|---|
 | **Dashboard** (`/`) | Verdict distribution spectrum, totals, live "running" counter, recent analyses |
 | **New analysis** (`/analyze`) | Drag-&-drop an `.eml`/`.msg`, toggle intel / URL sharing / WHOIS / the three AI stages / YARA (upload your own rules), then watch a **live stage rail** — every pipeline stage lights up as it runs, with durations, skip reasons, and errors streamed straight from the audit log |
 | **Report** (`/report/{id}`) | The full evidence report in the browser: verdict banner, risk signals, header findings, YARA matches, IOCs, per-source threat intel, WHOIS ages, AI assessment, and the stage audit trail |
-| **History** (`/history`) | Every past analysis, filterable by verdict (malicious / suspicious / clean / errors / running) and searchable by filename |
+| **History** (`/history`) | Every past analysis, filterable by verdict (malicious / suspicious / clean / errors / running) and searchable by filename; admins can delete a single analysis here |
+| **Settings** (`/settings`, admin) | Automatic deletion (keep analyses N days, default 30; optionally delete the original email as soon as its analysis finishes), delete all analyses, user management (add, change role, reset password, disable, delete) and the audit trail |
+| **Account** (`/account`) | Change your password |
 
 The live progress view is powered by the pipeline's own structured logging —
 the UI tails the JSON-Lines audit log, so what you see is exactly what ran.
@@ -315,22 +333,35 @@ rules reached different conclusions:
 
 
 
-> 🔒 **Security & privacy notes.** The console has no login; it is a
-> single-analyst workstation tool and listens on `127.0.0.1`. It only answers
-> requests addressed to `127.0.0.1`, `localhost` or `[::1]` (against DNS
+> 🔒 **Security & privacy notes.** Every page needs a login. Passwords are
+> stored as scrypt hashes; the session cookie is HttpOnly and SameSite=Strict,
+> expires after 30 minutes idle (12 hours at most), and logins, user changes and
+> deletions are written to the audit trail. The console listens on `127.0.0.1`
+> by default and only answers requests addressed to `127.0.0.1`, `localhost` or `[::1]` (against DNS
 > rebinding), accepts uploads only from its own page (against CSRF), escapes
 > everything it displays and sends a strict Content-Security-Policy, and runs
 > at most `--max-parallel` analyses at once. Uploads are streamed to disk
 > (memory use does not grow with the file size), silent or very slow
 > connections are dropped, an analysis slot is only taken once an upload has
-> fully arrived, and every analysis runs with a memory and CPU limit. To reach it from other machines,
-> put it behind a reverse proxy that requires login, start it with
-> `--host 0.0.0.0` and pass the proxy's name with `--allow-host`.
+> fully arrived, and every analysis runs with a memory and CPU limit.
+>
+> To reach it from other machines it must be encrypted, otherwise it refuses
+> to start on a network address:
+>
+> ```bash
+> # HTTPS directly (certificate and key in PEM format)
+> python3 webui/app.py --host 0.0.0.0 --allow-host triage.example.org \
+>     --tls-cert cert.pem --tls-key key.pem
+> # ...or behind your own HTTPS reverse proxy
+> python3 webui/app.py --host 127.0.0.1 --behind-proxy --allow-host triage.example.org
+> ```
 >
 > Everything under `webui/data/` — uploaded emails, reports, and logs —
 > contains the content of the messages you analyze, including recipient
 > addresses and internal domains. The folder is created readable only by you
 > and is gitignored; treat it with the same care as the mailbox it came from.
+> Analyses older than 30 days are deleted automatically; change this on the
+> Settings page (0 keeps them forever).
 >
 > The threat-intel stage sends extracted IOCs (domains, URLs, hashes) to
 > third-party services. Untick it for sensitive material, or run the CLI with
@@ -863,7 +894,9 @@ API-compatible gateway (corporate proxy, LiteLLM, self-hosted relay).
 │   └── email-yara-scanner/
 ├── webui/                       # Option C — local web console (stdlib-only)
 │   ├── app.py                   #   HTTP server + JSON API + background runner
-│   ├── templates/               #   dashboard · analyze · report · history
+│   ├── auth.py                  #   users, roles, sessions, lockout, settings, audit
+│   ├── redact.py                #   hides email content from read-only users
+│   ├── templates/               #   dashboard · analyze · report · history · settings · login · account
 │   ├── static/                  #   design system (style.css)
 │   └── data/                    #   runtime: uploads, reports, logs, SQLite (gitignored)
 ├── tools/

@@ -251,3 +251,37 @@ label.check { display: flex; gap: 8px; align-items: center;
 }
 .filterbar .seg-group button:last-child { border-right: none; }
 .filterbar .seg-group button.on { background: var(--panel-2); color: var(--ink); }
+
+/* ---- accounts, settings, login ------------------------------------------ */
+input[type=password], input[type=number] {
+  background: var(--panel-2); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 8px; padding: 9px 12px; font: inherit; }
+input[type=text]:focus, input[type=password]:focus, input[type=number]:focus,
+select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.userbox { padding: 0 10px; display: flex; flex-direction: column; gap: 6px;
+  font-size: 13px; }
+.userbox .who { color: var(--ink); font-family: var(--mono); font-size: 12.5px; }
+.userbox .links { display: flex; gap: 12px; }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent);
+  font: inherit; cursor: pointer; }
+.linkbtn:hover { text-decoration: underline; }
+.btn.danger { background: var(--malicious); color: #fff; }
+.btn.small { padding: 5px 10px; font-size: 13px; }
+.form { display: flex; flex-direction: column; gap: 14px; max-width: 420px; }
+.form label { display: flex; flex-direction: column; gap: 6px; color: var(--muted);
+  font-size: 13.5px; }
+.row-inline { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.msg { font-size: 14px; min-height: 1.2em; }
+.msg.err { color: #FF8A7A; } .msg.ok { color: #6FE3A1; }
+.notice { background: rgba(38,198,218,.08); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px 14px; color: var(--muted);
+  font-size: 14px; margin-bottom: 18px; }
+.notice b { color: var(--ink); }
+.secret { font-family: var(--mono); background: var(--panel-2); padding: 3px 8px;
+  border-radius: 6px; color: var(--ink); user-select: all; }
+.auth-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.auth-card { width: 100%; max-width: 380px; }
+.auth-card .brand { padding: 0 0 18px; font-size: 22px; }
+.help { color: var(--faint); font-size: 13px; }
+.form label.check { flex-direction: row; align-items: flex-start; gap: 10px; }
+.form label.check input { margin-top: 3px; flex: none; }

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phishHunter — Settings</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="nav">
+    <div class="brand"><span class="fish">phish</span>Hunter</div>
+    <a class="item" href="/"><span class="dot"></span>Dashboard</a>
+    <a class="item" href="/analyze"><span class="dot"></span>New analysis</a>
+    <a class="item" href="/history"><span class="dot"></span>History</a>
+    <a class="item active" href="/settings" id="nav-settings"><span class="dot"></span>Settings</a>
+    <div class="spacer"></div>
+    <div class="userbox">
+      <div class="who" id="me-name"></div>
+      <div class="links"><a href="/account">Password</a><button class="linkbtn" id="logout">Log out</button></div>
+    </div>
+  </nav>
+
+  <main class="main">
+    <h1 class="page-title">Settings</h1>
+    <p class="page-sub">Data retention, users and the audit trail. Visible to admins only.</p>
+
+    <!-- Retention -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="section-title">Data retention</div>
+      <p class="help" style="margin-top:0">Uploaded emails, reports and logs contain message content.
+        Older analyses are deleted automatically once an hour.</p>
+      <form class="form" id="ret-form">
+        <label>Delete analyses older than (days, 0 = keep forever)
+          <input type="number" id="ret-days" min="0" max="3650" required>
+        </label>
+        <label class="check"><input type="checkbox" id="ret-orig">
+          Delete the original email and attachments as soon as an analysis finishes
+          (the report is kept)</label>
+        <button class="btn" type="submit" id="ret-save">Save</button>
+        <div class="msg" id="ret-msg" role="status"></div>
+      </form>
+    </div>
+
+    <!-- Purge -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="section-title">Delete all analyses</div>
+      <p class="help" style="margin-top:0">Removes every finished analysis with its uploaded email,
+        report and log. Users and settings are kept. This cannot be undone.</p>
+      <div class="row-inline">
+        <label style="display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:13.5px">
+          Type DELETE to confirm
+          <input type="text" id="purge-confirm" autocomplete="off">
+        </label>
+        <button class="btn danger" id="purge-go" disabled>Delete everything</button>
+      </div>
+      <div class="msg" id="purge-msg" role="status"></div>
+    </div>
+
+    <!-- Users -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="section-title">Users</div>
+      <p class="help" style="margin-top:0"><b>admin</b>: everything, including full reports and these settings.
+        <b>read-only</b>: starts analyses and reads reports with the email content hidden.</p>
+      <table class="list" id="users">
+        <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form class="row-inline" id="add-form" style="margin-top:16px">
+        <label style="display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:13.5px">
+          New user <input type="text" id="add-name" autocomplete="off" required></label>
+        <label style="display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:13.5px">
+          Role <select id="add-role"><option value="readonly">read-only</option><option value="admin">admin</option></select></label>
+        <button class="btn" type="submit">Add user</button>
+      </form>
+      <div class="msg" id="users-msg" role="status"></div>
+    </div>
+
+    <!-- Audit -->
+    <div class="card">
+      <div class="section-title">Audit trail</div>
+      <table class="list" id="audit">
+        <thead><tr><th>Time (UTC)</th><th>User</th><th>Action</th><th>Detail</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+<script>
+/* ---- session (shared by every console page) ----------------------------- */
+const _fetch = window.fetch.bind(window);
+window.fetch = async (url, opts) => {
+  const r = await _fetch(url, opts);
+  if (r.status === 401) location.href = "/login?next=" +
+      encodeURIComponent(location.pathname + location.search);
+  return r;
+};
+const POST = (url, body) => fetch(url, {method: "POST",
+  headers: {"Content-Type": "application/json", "X-PhishHunter-Request": "1"},
+  body: JSON.stringify(body || {})});
+let ME = null;
+async function loadMe() {
+  const r = await fetch("/api/me");
+  if (!r.ok) return null;
+  ME = await r.json();
+  document.getElementById("me-name").textContent =
+      `${ME.username} · ${ME.role === "admin" ? "admin" : "read-only"}`;
+  return ME;
+}
+document.getElementById("logout").onclick = async () => {
+  await POST("/api/logout"); location.href = "/login"; };
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
+/* ---- page --------------------------------------------------------------- */
+const $ = id => document.getElementById(id);
+const say = (id, text, ok) => { $(id).className = "msg " + (ok ? "ok" : "err"); $(id).textContent = text; };
+
+async function loadSettings() {
+  const r = await fetch("/api/settings"); if (!r.ok) return;
+  const s = await r.json();
+  $("ret-days").value = s.retention_days;
+  $("ret-orig").checked = s.delete_original_after_analysis === "1";
+}
+$("ret-form").onsubmit = async e => {
+  e.preventDefault();
+  const r = await POST("/api/settings", {retention_days: Number($("ret-days").value),
+                                          delete_original_after_analysis: $("ret-orig").checked});
+  const j = await r.json().catch(() => ({}));
+  r.ok ? say("ret-msg", "Saved.", true) : say("ret-msg", j.error || "Could not save.");
+  loadAudit();
+};
+
+$("purge-confirm").oninput = () => $("purge-go").disabled = $("purge-confirm").value !== "DELETE";
+$("purge-go").onclick = async () => {
+  const r = await POST("/api/purge", {confirm: $("purge-confirm").value});
+  const j = await r.json().catch(() => ({}));
+  $("purge-confirm").value = ""; $("purge-go").disabled = true;
+  r.ok ? say("purge-msg", `${j.deleted} analyses deleted.`, true) : say("purge-msg", j.error || "Failed.");
+  loadAudit();
+};
+
+async function userAction(id, action, role) {
+  const r = await POST(`/api/users/${id}`, {action, role});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return say("users-msg", j.error || "Failed.");
+  if (j.temporary_password) {
+    $("users-msg").className = "msg ok";
+    $("users-msg").innerHTML = `Temporary password for <b>${esc(j.username)}</b>: ` +
+      `<span class="secret">${esc(j.temporary_password)}</span> — shown once; ` +
+      `the user must change it at the next login.`;
+  } else say("users-msg", `Updated ${j.username}.`, true);
+  loadUsers(); loadAudit();
+}
+async function loadUsers() {
+  const r = await fetch("/api/users"); if (!r.ok) return;
+  const {items} = await r.json();
+  const tbody = document.querySelector("#users tbody");
+  tbody.innerHTML = "";
+  for (const u of items) {
+    const tr = document.createElement("tr");
+    const self = ME && u.username.toLowerCase() === ME.username.toLowerCase();
+    tr.innerHTML = `<td class="mono">${esc(u.username)}${self ? " (you)" : ""}</td>
+      <td>${u.role === "admin" ? "admin" : "read-only"}</td>
+      <td>${u.disabled ? "disabled" : (u.must_change ? "must change password" : "active")}</td>
+      <td class="mono" style="color:var(--muted)">${esc(u.last_login_utc || "never")}</td>
+      <td style="white-space:nowrap"></td>`;
+    const cell = tr.lastElementChild;
+    const add = (label, fn, cls) => { const b = document.createElement("button");
+      b.className = "btn small " + (cls || "ghost"); b.textContent = label; b.onclick = fn;
+      cell.appendChild(b); cell.appendChild(document.createTextNode(" ")); };
+    add("Reset password", () => userAction(u.id, "reset"));
+    if (!self) {
+      add(u.role === "admin" ? "Make read-only" : "Make admin",
+          () => userAction(u.id, "role", u.role === "admin" ? "readonly" : "admin"));
+      add(u.disabled ? "Enable" : "Disable", () => userAction(u.id, u.disabled ? "enable" : "disable"));
+      add("Delete", () => { if (confirm(`Delete user ${u.username}?`)) userAction(u.id, "delete"); }, "danger");
+    }
+    tbody.appendChild(tr);
+  }
+}
+$("add-form").onsubmit = async e => {
+  e.preventDefault();
+  const r = await POST("/api/users", {username: $("add-name").value, role: $("add-role").value});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return say("users-msg", j.error || "Could not add the user.");
+  $("users-msg").className = "msg ok";
+  $("users-msg").innerHTML = `User <b>${esc($("add-name").value)}</b> created. Temporary password: ` +
+    `<span class="secret">${esc(j.temporary_password)}</span> — shown once; ` +
+    `they must change it at the first login.`;
+  $("add-name").value = "";
+  loadUsers(); loadAudit();
+};
+
+async function loadAudit() {
+  const r = await fetch("/api/audit"); if (!r.ok) return;
+  const {items} = await r.json();
+  document.querySelector("#audit tbody").innerHTML = items.slice(0, 50).map(a =>
+    `<tr><td class="mono">${esc(a.ts_utc)}</td><td class="mono">${esc(a.username)}</td>
+     <td>${esc(a.action)}</td><td style="color:var(--muted)">${esc(a.detail)}</td></tr>`).join("");
+}
+
+loadMe().then(() => { loadSettings(); loadUsers(); loadAudit(); });
+</script>
+</body>
+</html>

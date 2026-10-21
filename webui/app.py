@@ -8,6 +8,9 @@ A zero-dependency web console for the email triage pipeline:
     Analyze     /analyze      drag-&-drop upload + live per-stage progress
     Report      /report/{id}  full evidence report rendered in the browser
     History     /history      past analyses, filterable by verdict/filename
+    Settings    /settings     retention, users, purge, audit trail (admin)
+    Account     /account      change your password
+    Log in      /login        the only page served without a session
 
 ============================================================================
 HOW IT WORKS
@@ -34,8 +37,12 @@ RUNNING
                          [--max-email-mb 50] [--read-timeout 30]
                          [--upload-timeout 120] [--max-connections 64]
                          [--max-memory-mb 4096]
+                         [--tls-cert PEM --tls-key PEM | --behind-proxy]
+    python3 webui/app.py --reset-admin     # new one-time admin password
 
-    Then open  http://127.0.0.1:8787
+    Then open  http://127.0.0.1:8787 and log in. On the first start an
+    "admin" account is created and its one-time password is printed in
+    this console; it must be changed at the first login.
 
     Optional env for the intel stage (same as the CLI):
       VT_API_KEY, ABUSEIPDB_API_KEY, OTX_API_KEY, URLSCAN_API_KEY,
@@ -46,8 +53,36 @@ RUNNING
     Install and enter keys first with:  python3 easy_install.py
 
 ============================================================================
-SECURITY MODEL (local, single-user console - no login)
+SECURITY MODEL
 ============================================================================
+    Users and roles (webui/auth.py, stored in the SQLite database):
+    * admin    - everything: full reports, settings, users, deletion.
+    * readonly - starts analyses and reads every report, but the server
+                 removes the email content first (webui/redact.py):
+                 subject, recipients, display names, quoted body text,
+                 text read from images and raw headers are hidden; e-mail
+                 addresses show only ***@domain; URLs lose their query
+                 string and fragment; other people's upload file names
+                 become "email-<id>".
+    * Passwords: scrypt (PBKDF2 fallback), at least 10 characters. New and
+      reset accounts get a one-time password that must be changed first.
+    * Sessions: random token in an HttpOnly, SameSite=Strict cookie (Secure
+      under TLS / --behind-proxy); only its SHA-256 is stored. Idle
+      timeout 30 min, absolute lifetime 12 h; a password change, disable
+      or delete ends the user's other sessions.
+    * Lockout: 5 failed logins within 15 min lock that user name and that
+      client IP for 15 min (HTTP 429). --reset-admin lifts all lockouts.
+    * Every login, user change, setting change and deletion goes to the
+      audit table (Settings page).
+    * Retention: analyses older than N days (default 30, 0 = forever) are
+      deleted hourly; optionally the original email is deleted as soon as
+      its analysis finishes. Admins can delete one analysis or all.
+    * Network: binding beyond loopback is refused unless --tls-cert and
+      --tls-key are given (HTTPS, TLS 1.2+) or --behind-proxy says a TLS
+      reverse proxy is in front (then the last X-Forwarded-For entry is
+      the client IP; add the proxy's name with --allow-host).
+
+    Request hardening:
     * Host header allow-list: only loopback names (and --allow-host values)
       are answered, so a web page cannot use DNS rebinding to read reports.
     * CSRF: POST requires the X-PhishHunter-Request header and a matching
@@ -64,8 +99,6 @@ SECURITY MODEL (local, single-user console - no login)
       --upload-timeout, are dropped (408); above --max-connections new
       connections get 503.
     * Each analysis runs with --max-memory-mb and a CPU limit.
-    Binding beyond loopback (--host 0.0.0.0) has NO authentication: put an
-    authenticated reverse proxy in front and pass its name with --allow-host.
 
 ============================================================================
 HTTP API (all JSON unless noted)
@@ -74,7 +107,21 @@ HTTP API (all JSON unless noted)
     GET  /analyze               analyze page            (text/html)
     GET  /history               history page            (text/html)
     GET  /report/{id}           report page             (text/html)
-    GET  /static/<file>         css/js assets
+    GET  /settings              settings page (admin)   (text/html)
+    GET  /account, /login       account / login pages   (text/html)
+    GET  /static/<file>         css/js assets (no session needed)
+
+    Every route except /login, /static and POST /api/login needs a session
+    cookie: pages redirect to /login, API calls get 401. A user with a
+    one-time password gets 403 everywhere except /account until it is
+    changed. Every POST needs the "X-PhishHunter-Request: 1" header.
+
+    POST /api/login             {"username","password"} → {"username",
+                                "role","must_change"} + session cookie
+                                401 wrong credentials · 429 locked out
+    POST /api/logout            ends the session
+    GET  /api/me                → {"username","role","must_change"}
+    POST /api/account/password  {"current","new"}
 
     POST /api/analyze           multipart form upload; REQUIRED header
                                 "X-PhishHunter-Request: 1" (CSRF guard).
@@ -99,17 +146,35 @@ HTTP API (all JSON unless noted)
                                    "verdict": {...}|null }
     GET  /api/analysis/{id}/report
                                 → the full pipeline JSON report
+                                  (read-only users: redacted copy with
+                                   "redacted": {...} added)
     GET  /api/analyses?verdict=&q=&limit=
                                 → {"items":[{id,filename,verdict,score,
                                     confidence,created_utc,status}...]}
     GET  /api/stats             → dashboard counters + recent list
 
+    Admin only (403 for read-only users):
+    GET  /api/settings          → {"retention_days","delete_original_
+                                   after_analysis"}
+    POST /api/settings          {"retention_days": 0-3650,
+                                 "delete_original_after_analysis": bool}
+    GET  /api/users             → {"items":[{id,username,role,disabled,
+                                   must_change,created_utc,last_login_utc}]}
+    POST /api/users             {"username","role"} → {"id",
+                                 "temporary_password"}
+    POST /api/users/{id}        {"action": role|reset|disable|enable|
+                                 delete, "role"} (not on yourself, except
+                                 reset; the last admin is protected)
+    GET  /api/audit             → {"items":[{ts_utc,username,action,
+                                   detail}]}  (latest 200)
+    POST /api/analysis/{id}/delete    delete one finished analysis
+    POST /api/purge             {"confirm":"DELETE"} → {"deleted": n}
+
 ============================================================================
 SECURITY NOTES
 ============================================================================
-* Binds to 127.0.0.1 by default — this console is meant for a single
-  analyst workstation, not public exposure. Put a reverse proxy with
-  auth in front of it before sharing on a network.
+* Binds to 127.0.0.1 by default. To share it on a network use
+  --tls-cert/--tls-key, or a TLS reverse proxy with --behind-proxy.
 * Uploaded filenames are sanitized; files are stored under a per-analysis
   directory and never executed.
 * The report endpoint only serves ids that exist in the local database.
@@ -118,14 +183,17 @@ SECURITY NOTES
 
 import argparse
 import datetime as dt
+import http.cookies
 import json
 import mimetypes
 import mmap
 import os
 import re
 import secrets
+import shutil
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -133,7 +201,11 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import auth  # noqa: E402  users, sessions, settings, audit
+import redact  # noqa: E402  email content removal for read-only users
 
 # ---------------------------------------------------------------------------
 # Paths — everything the UI writes lives under webui/data/ so the repository
@@ -183,6 +255,14 @@ SKILLS_ROOT = os.path.join(REPO_ROOT, "skills")   # overridable via CLI
 # ---------------------------------------------------------------------------
 ALLOWED_HOSTS = set()
 CSRF_HEADER = "X-PhishHunter-Request"
+# Authentication (see auth.py). The session cookie is HttpOnly and
+# SameSite=Strict, and Secure whenever the console is served over TLS or
+# behind a TLS-terminating proxy.
+COOKIE_NAME = "ph_session"
+SECURE_COOKIES = False
+BEHIND_PROXY = False         # trust X-Forwarded-For for the client address
+MAX_JSON = 16 * 1024         # body limit for JSON API requests
+RETENTION_INTERVAL = 3600    # seconds between automatic clean-ups
 MAX_PARALLEL = 2
 STAGE_TIMEOUT = 300          # seconds per pipeline stage (--timeout)
 ANALYSIS_TIMEOUT = 3600      # hard limit for one whole analysis
@@ -275,7 +355,8 @@ def init_db():
             "PRAGMA table_info(analyses)")}
         for col, ddl in (("ai_verdict", "TEXT"),
                          ("ai_confidence", "INTEGER"),
-                         ("ai_agrees", "INTEGER")):
+                         ("ai_agrees", "INTEGER"),
+                         ("created_by", "TEXT")):
             if col not in have:
                 conn.execute(f"ALTER TABLE analyses ADD COLUMN {col} {ddl}")
         # Runs that were still "running" when the server stopped can never
@@ -283,7 +364,89 @@ def init_db():
         conn.execute("UPDATE analyses SET status='error', error=? "
                      "WHERE status='running'",
                      ("interrupted: the web UI was stopped during the run",))
+        auth.init_schema(conn)
+        admin_password = auth.ensure_admin(conn)
     secure_data_dir()
+    return admin_password
+
+
+# ---------------------------------------------------------------------------
+# Deleting data - single analyses, everything, and automatic retention
+# ---------------------------------------------------------------------------
+def delete_analysis_files(analysis_id):
+    """Remove the upload folder, report and log of one analysis."""
+    if not re.fullmatch(r"[0-9a-f]{32}", analysis_id or ""):
+        return
+    shutil.rmtree(os.path.join(UPLOAD_DIR, analysis_id), ignore_errors=True)
+    for path in (os.path.join(REPORT_DIR, f"{analysis_id}.json"),
+                 os.path.join(LOG_DIR, f"{analysis_id}.log")):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def delete_analysis(conn, analysis_id):
+    """
+    Delete one analysis (row + files).
+
+    Output: True when it existed. Running analyses are not deleted.
+    """
+    row = conn.execute("SELECT status FROM analyses WHERE id=?",
+                       (analysis_id,)).fetchone()
+    if not row or row["status"] == "running":
+        return False
+    conn.execute("DELETE FROM analyses WHERE id=?", (analysis_id,))
+    delete_analysis_files(analysis_id)
+    return True
+
+
+def purge_all(conn):
+    """
+    Delete every finished analysis with its upload, report and log.
+
+    Output: number of analyses deleted. Running analyses are kept.
+    """
+    ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM analyses WHERE status != 'running'")]
+    for analysis_id in ids:
+        conn.execute("DELETE FROM analyses WHERE id=?", (analysis_id,))
+        delete_analysis_files(analysis_id)
+    return len(ids)
+
+
+def apply_retention():
+    """
+    Delete analyses older than the "retention_days" setting (0 = never) and
+    expired sessions. Output: number of analyses deleted.
+    """
+    with db() as conn:
+        auth.cleanup(conn)
+        days = int(auth.get_settings(conn).get("retention_days") or 0)
+        if days <= 0:
+            return 0
+        cutoff = (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(days=days)).isoformat()
+        ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM analyses WHERE created_utc < ? AND "
+            "status != 'running'", (cutoff,))]
+        for analysis_id in ids:
+            conn.execute("DELETE FROM analyses WHERE id=?", (analysis_id,))
+            delete_analysis_files(analysis_id)
+        if ids:
+            auth.audit(conn, "system", "retention_delete",
+                       f"{len(ids)} analyses older than {days} days")
+        return len(ids)
+
+
+def retention_loop():
+    """Background thread: apply the retention policy once an hour."""
+    while True:
+        try:
+            apply_retention()
+        except Exception as exc:  # keep the thread alive; retry next hour
+            print(f"[retention] failed: {exc}", file=sys.stderr)
+        time.sleep(RETENTION_INTERVAL)
 
 
 def sanitize_filename(name):
@@ -379,7 +542,16 @@ def run_analysis(analysis_id, email_path, options):
                 "UPDATE analyses SET status='error', error=? WHERE id=?",
                 (str(e)[:500], analysis_id))
     finally:
-        _slots.release()
+        try:
+            with db() as conn:
+                drop = auth.get_settings(conn).get(
+                    "delete_original_after_analysis") == "1"
+            if drop:
+                # Keep the report, remove the email and its attachments.
+                shutil.rmtree(os.path.join(UPLOAD_DIR, analysis_id),
+                              ignore_errors=True)
+        finally:
+            _slots.release()
 
 
 def read_progress(analysis_id):
@@ -558,7 +730,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- small response helpers ----------------------------------------
     def _send(self, code, body, ctype="application/json; charset=utf-8",
-              csp=None):
+              csp=None, headers=None):
         """Write a response with the console's security headers.
 
         Input : code, body (str|bytes), ctype, csp (page-specific policy;
@@ -574,6 +746,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy",
                          csp or "default-src 'none'; frame-ancestors 'none'")
+        for name, value in headers or ():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -595,8 +769,80 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         return True
 
-    def _json(self, obj, code=200):
-        self._send(code, json.dumps(obj, ensure_ascii=False, default=str))
+    def _json(self, obj, code=200, headers=None):
+        self._send(code, json.dumps(obj, ensure_ascii=False, default=str),
+                   headers=headers)
+
+    def _redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    # ---- authentication helpers ------------------------------------------
+    def _client_ip(self):
+        """Output: client address used for lockout and the audit trail.
+
+        With --behind-proxy this is the LAST X-Forwarded-For entry: the
+        one the (single, trusted) reverse proxy appended. Earlier entries
+        come from the client and can be forged, so using them would let an
+        attacker dodge the per-IP lockout. Without the flag: the socket peer.
+        """
+        if BEHIND_PROXY:
+            fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[-1]
+            if fwd.strip():
+                return fwd.strip()[:64]
+        return self.client_address[0]
+
+    def _session_token(self):
+        cookie = http.cookies.SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie") or "")
+        except http.cookies.CookieError:
+            return None
+        morsel = cookie.get(COOKIE_NAME)
+        return morsel.value if morsel else None
+
+    def _user(self):
+        """Output: the logged-in user dict (cached per request) or None."""
+        if not hasattr(self, "_cached_user"):
+            with db() as conn:
+                self._cached_user = auth.session_user(conn,
+                                                      self._session_token())
+        return self._cached_user
+
+    def _cookie(self, token, max_age):
+        attrs = [f"{COOKIE_NAME}={token}", "Path=/", "HttpOnly",
+                 "SameSite=Strict", f"Max-Age={max_age}"]
+        if SECURE_COOKIES:
+            attrs.append("Secure")
+        return ("Set-Cookie", "; ".join(attrs))
+
+    def _read_json(self):
+        """Read a small JSON request body. Output: dict ({} when empty)."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise UploadError(400, "invalid Content-Length") from None
+        if length > MAX_JSON:
+            raise UploadError(413, "request too large")
+        raw = b""
+        while len(raw) < length:
+            try:
+                chunk = self.rfile.read1(length - len(raw))
+            except (socket.timeout, TimeoutError):
+                raise UploadError(408, "request timed out") from None
+            if not chunk:
+                break
+            raw += chunk
+        try:
+            data = json.loads(raw.decode("utf-8") or "{}")
+        except ValueError:
+            raise UploadError(400, "invalid JSON") from None
+        if not isinstance(data, dict):
+            raise UploadError(400, "JSON object expected")
+        return data
 
     def _page(self, template_name):
         """Serve an HTML template file verbatim (data is fetched via JS)."""
@@ -624,6 +870,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- routing --------------------------------------------------------
     def do_GET(self):
+        self.__dict__.pop("_cached_user", None)    # never reuse across requests
         if not self._host_allowed():
             return self._send(403, "host not allowed", "text/plain")
         try:
@@ -632,6 +879,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "internal error"}, 500)
 
     def do_POST(self):
+        self.__dict__.pop("_cached_user", None)
         if not self._host_allowed():
             return self._send(403, "host not allowed", "text/plain")
         if not self._same_origin_post():
@@ -648,7 +896,47 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         parts = [p for p in url.path.split("/") if p]
 
+        # Public: login page and static files -------------------------------
+        if url.path == "/login":
+            if self._user() and not self._user()["must_change"]:
+                return self._redirect("/")
+            return self._page("login.html")
+        if parts and parts[0] == "static":
+            fpath = os.path.normpath(os.path.join(STATIC_DIR, *parts[1:]))
+            if not fpath.startswith(STATIC_DIR + os.sep) or \
+                    not os.path.isfile(fpath):
+                return self._send(404, "not found", "text/plain")
+            ctype = mimetypes.guess_type(fpath)[0] or "application/octet-stream"
+            with open(fpath, "rb") as f:
+                return self._send(200, f.read(), ctype)
+
+        # Everything else needs a session -----------------------------------
+        user = self._user()
+        is_api = url.path.startswith("/api/")
+        if not user:
+            if is_api:
+                return self._json({"error": "login required"}, 401)
+            nxt = quote(url.path + (("?" + url.query) if url.query else ""))
+            return self._redirect(f"/login?next={nxt}")
+        if url.path == "/api/me":
+            return self._json({"username": user["username"],
+                               "role": user["role"],
+                               "must_change": bool(user["must_change"])})
+        if user["must_change"]:
+            # A temporary password must be replaced before anything else.
+            if url.path == "/account":
+                return self._page("account.html")
+            if is_api:
+                return self._json({"error": "password change required"}, 403)
+            return self._redirect("/account")
+        is_admin = user["role"] == "admin"
+
         # Pages ------------------------------------------------------------
+        if url.path == "/account":
+            return self._page("account.html")
+        if url.path == "/settings":
+            return self._page("settings.html") if is_admin \
+                else self._redirect("/")
         if url.path == "/":
             return self._page("dashboard.html")
         if url.path == "/analyze":
@@ -658,16 +946,16 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 2 and parts[0] == "report":
             return self._page("report.html")
 
-        # Static assets -----------------------------------------------------
-        if parts and parts[0] == "static":
-            fpath = os.path.normpath(os.path.join(STATIC_DIR, *parts[1:]))
-            if not fpath.startswith(STATIC_DIR) or not os.path.isfile(fpath):
-                return self._send(404, "not found", "text/plain")
-            ctype = mimetypes.guess_type(fpath)[0] or "application/octet-stream"
-            with open(fpath, "rb") as f:
-                return self._send(200, f.read(), ctype)
-
         # JSON API ----------------------------------------------------------
+        if url.path in ("/api/settings", "/api/users", "/api/audit"):
+            if not is_admin:
+                return self._json({"error": "admin only"}, 403)
+            with db() as conn:
+                if url.path == "/api/settings":
+                    return self._json(auth.get_settings(conn))
+                if url.path == "/api/users":
+                    return self._json({"items": auth.list_users(conn)})
+                return self._json({"items": auth.recent_audit(conn, 200)})
         if url.path == "/api/stats":
             return self.api_stats()
         if url.path == "/api/analyses":
@@ -683,15 +971,127 @@ class Handler(BaseHTTPRequestHandler):
             if not re.fullmatch(r"[0-9a-f]{32}", parts[2]) \
                     or not os.path.isfile(rp):
                 return self._json({"error": "report not found"}, 404)
-            with open(rp, "rb") as f:
-                return self._send(200, f.read())
+            if is_admin:
+                with open(rp, "rb") as f:
+                    return self._send(200, f.read())
+            # Read-only users get the report with the email content
+            # removed - done here, so it never reaches the browser.
+            with db() as conn:
+                row = conn.execute("SELECT id, filename, created_by FROM "
+                                   "analyses WHERE id=?",
+                                   (parts[2],)).fetchone()
+            name = (self._mask_rows([dict(row)])[0]["filename"]
+                    if row else None)
+            with open(rp, "r", encoding="utf-8") as f:
+                return self._json(redact.redact_report(json.load(f), name))
 
         return self._send(404, "not found", "text/plain")
 
     def _post(self):
         url = urlparse(self.path)
-        if url.path != "/api/analyze":
-            return self._send(404, "not found", "text/plain")
+        try:
+            if url.path == "/api/login":
+                return self._api_login(self._read_json())
+            user = self._user()
+            if not user:
+                return self._json({"error": "login required"}, 401)
+            if url.path == "/api/logout":
+                with db() as conn:
+                    auth.logout(conn, user["token_hash"])
+                    auth.audit(conn, user["username"], "logout")
+                return self._json({"ok": True},
+                                  headers=[self._cookie("", 0)])
+            if url.path == "/api/account/password":
+                return self._api_password(user, self._read_json())
+            if user["must_change"]:
+                return self._json({"error": "password change required"}, 403)
+            if url.path == "/api/analyze":
+                return self._upload(user)
+            if user["role"] != "admin":
+                return self._json({"error": "admin only"}, 403)
+            return self._admin_post(user, url.path, self._read_json())
+        except UploadError as e:
+            if e.code in (408, 413):
+                self.close_connection = True
+            try:
+                return self._json({"error": str(e)}, e.code)
+            except OSError:
+                return None
+
+    # ---- auth / admin endpoints -------------------------------------------
+    def _api_login(self, data):
+        with db() as conn:
+            try:
+                token, user = auth.login(conn, data.get("username"),
+                                         data.get("password"),
+                                         self._client_ip())
+            except ValueError as e:
+                code = 429 if "too many" in str(e) else 401
+                return self._json({"error": str(e)}, code)
+        return self._json({"username": user["username"], "role": user["role"],
+                           "must_change": bool(user["must_change"])},
+                          headers=[self._cookie(token,
+                                                auth.SESSION_LIFETIME)])
+
+    def _api_password(self, user, data):
+        with db() as conn:
+            try:
+                auth.change_password(conn, user["id"], data.get("current"),
+                                     data.get("new"), user["token_hash"])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            auth.audit(conn, user["username"], "password_changed")
+        return self._json({"ok": True})
+
+    def _admin_post(self, user, path, data):
+        """Admin-only actions: users, settings, deletion."""
+        parts = [p for p in path.split("/") if p]
+        who = user["username"]
+        with db() as conn:
+            try:
+                if path == "/api/users":
+                    uid, pw = auth.create_user(conn, data.get("username"),
+                                               data.get("role"))
+                    auth.audit(conn, who, "user_created",
+                               f"{data.get('username')} ({data.get('role')})")
+                    return self._json({"id": uid, "temporary_password": pw})
+                if len(parts) == 3 and parts[:2] == ["api", "users"] and \
+                        parts[2].isdigit():
+                    target = int(parts[2])
+                    if target == user["id"] and data.get("action") in (
+                            "disable", "delete", "role"):
+                        raise ValueError("you cannot disable, delete or "
+                                         "demote your own account")
+                    res = auth.update_user(conn, target, data.get("action"),
+                                           data.get("role"))
+                    auth.audit(conn, who, f"user_{data.get('action')}",
+                               res["username"] + (f" -> {data.get('role')}"
+                                                  if data.get("role") else ""))
+                    return self._json(res)
+                if path == "/api/settings":
+                    res = auth.set_settings(conn, data)
+                    auth.audit(conn, who, "settings_changed",
+                               json.dumps(res, sort_keys=True))
+                    return self._json(res)
+                if path == "/api/purge":
+                    if data.get("confirm") != "DELETE":
+                        raise ValueError('type DELETE to confirm')
+                    n = purge_all(conn)
+                    auth.audit(conn, who, "purge", f"{n} analyses deleted")
+                    return self._json({"deleted": n})
+                if len(parts) == 4 and parts[:2] == ["api", "analysis"] and \
+                        parts[3] == "delete":
+                    if not delete_analysis(conn, parts[2]):
+                        return self._json({"error": "not found or still "
+                                                    "running"}, 404)
+                    auth.audit(conn, who, "analysis_deleted", parts[2])
+                    return self._json({"deleted": 1})
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        return self._send(404, "not found", "text/plain")
+
+    def _upload(self, user):
+        self._uploader = user["username"]
 
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -787,10 +1187,11 @@ class Handler(BaseHTTPRequestHandler):
 
             with db() as conn:
                 conn.execute(
-                    "INSERT INTO analyses (id, filename, created_utc, status) "
-                    "VALUES (?,?,?,?)",
+                    "INSERT INTO analyses (id, filename, created_utc, status, "
+                    "created_by) VALUES (?,?,?,?,?)",
                     (analysis_id, fname,
-                     dt.datetime.now(dt.timezone.utc).isoformat(), "running"))
+                     dt.datetime.now(dt.timezone.utc).isoformat(), "running",
+                     getattr(self, "_uploader", None)))
 
             threading.Thread(target=run_analysis,
                              args=(analysis_id, email_path, options),
@@ -823,15 +1224,35 @@ class Handler(BaseHTTPRequestHandler):
             counts["ai_disagreements"] = row["c"] if row else 0
             recent = [dict(r) for r in conn.execute(
                 "SELECT id, filename, created_utc, status, verdict, score, "
-                "confidence, ai_verdict, ai_confidence, ai_agrees "
+                "confidence, ai_verdict, ai_confidence, ai_agrees, created_by "
                 "FROM analyses ORDER BY created_utc DESC LIMIT 8")]
-        return self._json({"counts": counts, "recent": recent})
+        return self._json({"counts": counts,
+                           "recent": self._mask_rows(recent)})
+
+    def _mask_rows(self, rows):
+        """Hide other people's upload filenames from read-only users.
+
+        Input : list of analysis row dicts (with "filename", "created_by").
+        Output: the same list. For a read-only user, rows uploaded by
+                someone else get filename "email-<first 8 id chars>" -
+                file names often repeat the email subject, which that role
+                must not see. Admins get every row unchanged.
+        """
+        user = self._user() or {}
+        if user.get("role") == "admin":
+            return rows
+        me = (user.get("username") or "").lower()
+        for r in rows:
+            if (r.get("created_by") or "").lower() != me:
+                r["filename"] = "email-" + r["id"][:8]
+        return rows
 
     def api_analyses(self, q):
         """History listing with optional filters.
 
         Query params: verdict=malicious|suspicious|clean|error|running
-                      q=<substring of filename>   limit=<n, default 200>
+                      q=<substring of filename, or id prefix>   limit=<n, default 200>
+                      (read-only users: filename search covers own uploads)
         """
         clauses, params = [], []
         verdict = (q.get("verdict") or [""])[0]
@@ -845,7 +1266,17 @@ class Handler(BaseHTTPRequestHandler):
             clauses.append("ai_agrees = 0")
         needle = (q.get("q") or [""])[0].strip()
         if needle:
-            clauses.append("filename LIKE ?"); params.append(f"%{needle}%")
+            user = self._user() or {}
+            if user.get("role") == "admin":
+                clauses.append("(filename LIKE ? OR id LIKE ?)")
+                params += [f"%{needle}%", f"{needle.lower()}%"]
+            else:
+                # Read-only: the filename search covers only your own
+                # uploads, so it cannot be used to probe hidden names.
+                clauses.append("((filename LIKE ? AND lower(created_by) = ?)"
+                               " OR id LIKE ?)")
+                params += [f"%{needle}%", (user.get("username") or "").lower(),
+                           f"{needle.lower()}%"]
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         try:
             limit = int((q.get("limit") or ["200"])[0] or 200)
@@ -855,10 +1286,10 @@ class Handler(BaseHTTPRequestHandler):
         with db() as conn:
             items = [dict(r) for r in conn.execute(
                 f"SELECT id, filename, created_utc, status, verdict, score, "
-                f"confidence, ai_verdict, ai_confidence, ai_agrees "
+                f"confidence, ai_verdict, ai_confidence, ai_agrees, created_by "
                 f"FROM analyses {where} "
                 f"ORDER BY created_utc DESC LIMIT ?", params + [limit])]
-        return self._json({"items": items})
+        return self._json({"items": self._mask_rows(items)})
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -936,11 +1367,13 @@ def main():
     global SKILLS_ROOT, ALLOWED_HOSTS, MAX_PARALLEL, _slots, \
         STAGE_TIMEOUT, ANALYSIS_TIMEOUT, MAX_EMAIL_MB, READ_TIMEOUT, \
         UPLOAD_TIMEOUT, MAX_CONNECTIONS, _conn_slots, MAX_MEMORY_MB, \
-        MAX_CPU_SECONDS
+        MAX_CPU_SECONDS, SECURE_COOKIES, BEHIND_PROXY
     ap = argparse.ArgumentParser(description="phishHunter Web UI")
     ap.add_argument("--host", default="127.0.0.1",
-                    help="bind address (default 127.0.0.1 — keep local; put "
-                         "an authenticated reverse proxy in front to share)")
+                    help="bind address (default 127.0.0.1). Binding beyond "
+                         "loopback requires --tls-cert/--tls-key or "
+                         "--behind-proxy, so passwords never cross the "
+                         "network in clear text.")
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--skills-root",
                     help="directory containing the skill folders "
@@ -977,7 +1410,40 @@ def main():
     ap.add_argument("--max-memory-mb", type=int, default=4096,
                     help="memory limit per analysis process in MB, 0 = none "
                          "(default 4096; POSIX only)")
+    ap.add_argument("--tls-cert", metavar="PEM",
+                    help="serve HTTPS with this certificate (with --tls-key)")
+    ap.add_argument("--tls-key", metavar="PEM",
+                    help="private key for --tls-cert")
+    ap.add_argument("--behind-proxy", action="store_true",
+                    help="a TLS-terminating reverse proxy is in front: mark "
+                         "cookies Secure and take the client address from "
+                         "X-Forwarded-For (for login lockout)")
+    ap.add_argument("--reset-admin", action="store_true",
+                    help="give the 'admin' account a new one-time password "
+                         "(re-enabling it if needed), print it and exit")
     args = ap.parse_args()
+
+    if args.reset_admin:
+        os.umask(0o077)
+        init_db()
+        with db() as conn:
+            pw = auth.reset_admin(conn)
+        print("The 'admin' account has a new one-time password:\n\n"
+              f"    {pw}\n\nIt must be changed at the next login.")
+        return
+
+    loopback = args.host in ("127.0.0.1", "localhost", "::1")
+    if bool(args.tls_cert) != bool(args.tls_key):
+        print("error: --tls-cert and --tls-key go together", file=sys.stderr)
+        sys.exit(2)
+    if not loopback and not (args.tls_cert or args.behind_proxy):
+        print("error: refusing to listen on a network address without "
+              "encryption - passwords would travel in clear text. Use "
+              "--tls-cert/--tls-key, or --behind-proxy behind a TLS reverse "
+              "proxy.", file=sys.stderr)
+        sys.exit(2)
+    SECURE_COOKIES = bool(args.tls_cert) or args.behind_proxy
+    BEHIND_PROXY = args.behind_proxy
 
     # Everything the console writes (uploads, reports, logs, the index -
     # and the pipeline it starts) is created private to this user.
@@ -1028,18 +1494,33 @@ def main():
     if not os.path.isfile(PIPELINE):
         print(f"error: pipeline not found at {PIPELINE}", file=sys.stderr)
         sys.exit(1)
-    init_db()
+    admin_password = init_db()
     server = BoundedThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"phishHunter Web UI  →  http://{args.host}:{args.port}")
+    scheme = "http"
+    if args.tls_cert:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(args.tls_cert, args.tls_key)
+        # Handshake in the connection's own thread (with its read timeout),
+        # so a client that never completes it cannot block new connections.
+        server.socket = ctx.wrap_socket(server.socket, server_side=True,
+                                        do_handshake_on_connect=False)
+        scheme = "https"
+    threading.Thread(target=retention_loop, daemon=True).start()
+    print(f"phishHunter Web UI  →  {scheme}://{args.host}:{args.port}")
     print(f"  skills root : {SKILLS_ROOT}")
     print(f"  data dir    : {DATA_DIR}  (private: 700/600)")
     print(f"  accepts Host: {', '.join(sorted(ALLOWED_HOSTS))}")
-    if args.host not in ("127.0.0.1", "localhost", "::1"):
-        print("  WARNING: listening beyond loopback with NO authentication."
-              " Put an authenticated reverse proxy in front and pass its "
-              "name with --allow-host.", file=sys.stderr)
+    if not loopback:
+        print("  listening beyond loopback: login required, cookies Secure; "
+              "pass the public host name with --allow-host", file=sys.stderr)
     print(f"  key config  : {cfg_line}")
     print(f"  API keys    : {', '.join(keys) if keys else 'none set'}")
+    if admin_password:
+        print("\n  First start: an 'admin' account was created.\n"
+              f"  One-time password:  {admin_password}\n"
+              "  Log in and choose a new password. This is shown only "
+              "once;\n  if lost, run: python3 webui/app.py --reset-admin\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phishHunter — Account</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="nav">
+    <div class="brand"><span class="fish">phish</span>Hunter</div>
+    <a class="item" href="/"><span class="dot"></span>Dashboard</a>
+    <a class="item" href="/analyze"><span class="dot"></span>New analysis</a>
+    <a class="item" href="/history"><span class="dot"></span>History</a>
+    <a class="item" href="/settings" id="nav-settings" style="display:none"><span class="dot"></span>Settings</a>
+    <div class="spacer"></div>
+    <div class="userbox">
+      <div class="who" id="me-name"></div>
+      <div class="links"><a href="/account">Password</a><button class="linkbtn" id="logout">Log out</button></div>
+    </div>
+  </nav>
+
+  <main class="main">
+    <h1 class="page-title">Account</h1>
+    <p class="page-sub">Change your password.</p>
+    <div class="notice" id="must-change" style="display:none">
+      <b>Choose a new password to continue.</b> You logged in with a temporary
+      password; the rest of the console opens once it has been replaced.
+    </div>
+    <div class="card">
+      <form class="form" id="pw-form">
+        <label>Current password
+          <input type="password" id="current" autocomplete="current-password" required>
+        </label>
+        <label>New password (at least 10 characters)
+          <input type="password" id="new1" autocomplete="new-password" minlength="10" required>
+        </label>
+        <label>Repeat new password
+          <input type="password" id="new2" autocomplete="new-password" minlength="10" required>
+        </label>
+        <button class="btn" type="submit" id="save">Change password</button>
+        <div class="msg" id="msg" role="status"></div>
+      </form>
+    </div>
+  </main>
+</div>
+<script>
+/* ---- session (shared by every console page) ----------------------------- */
+const _fetch = window.fetch.bind(window);
+window.fetch = async (url, opts) => {
+  const r = await _fetch(url, opts);
+  if (r.status === 401) location.href = "/login?next=" +
+      encodeURIComponent(location.pathname + location.search);
+  return r;
+};
+const POST = (url, body) => fetch(url, {method: "POST",
+  headers: {"Content-Type": "application/json", "X-PhishHunter-Request": "1"},
+  body: JSON.stringify(body || {})});
+let ME = null;
+async function loadMe() {
+  const r = await fetch("/api/me");
+  if (!r.ok) return null;
+  ME = await r.json();
+  document.getElementById("me-name").textContent =
+      `${ME.username} · ${ME.role === "admin" ? "admin" : "read-only"}`;
+  if (ME.role === "admin" && !ME.must_change)
+      document.getElementById("nav-settings").style.display = "";
+  return ME;
+}
+document.getElementById("logout").onclick = async () => {
+  await POST("/api/logout"); location.href = "/login"; };
+
+/* ---- page --------------------------------------------------------------- */
+const $ = id => document.getElementById(id);
+loadMe().then(me => { if (me && me.must_change) $("must-change").style.display = ""; });
+$("pw-form").onsubmit = async e => {
+  e.preventDefault();
+  const msg = $("msg");
+  msg.className = "msg err";
+  if ($("new1").value !== $("new2").value) { msg.textContent = "The new passwords do not match."; return; }
+  $("save").disabled = true;
+  const r = await POST("/api/account/password", {current: $("current").value, new: $("new1").value});
+  const j = await r.json().catch(() => ({}));
+  $("save").disabled = false;
+  if (!r.ok) { msg.textContent = j.error || "Could not change the password."; return; }
+  ["current", "new1", "new2"].forEach(id => $(id).value = "");
+  msg.className = "msg ok";
+  msg.textContent = "Password changed. Other sessions of this account were logged out.";
+  if (ME && ME.must_change) setTimeout(() => location.href = "/", 900);
+};
+</script>
+</body>
+</html>

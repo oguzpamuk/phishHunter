@@ -13,8 +13,12 @@
     <a class="item" href="/"><span class="dot"></span>Dashboard</a>
     <a class="item" href="/analyze"><span class="dot"></span>New analysis</a>
     <a class="item active" href="/history"><span class="dot"></span>History</a>
+    <a class="item" href="/settings" id="nav-settings" style="display:none"><span class="dot"></span>Settings</a>
     <div class="spacer"></div>
-    <div class="foot">local console · v1.0</div>
+    <div class="userbox">
+      <div class="who" id="me-name"></div>
+      <div class="links"><a href="/account">Password</a><button class="linkbtn" id="logout">Log out</button></div>
+    </div>
   </nav>
 
   <main class="main">
@@ -31,7 +35,7 @@
         <button data-v="error">Errors</button>
         <button data-v="running">Running</button>
       </div>
-      <input type="text" id="q" placeholder="Search filename…"
+      <input type="text" id="q" placeholder="Search filename or id…"
              style="flex:1; min-width:180px" aria-label="Search filename">
       <span id="count" style="color:var(--faint); font-size:13px"></span>
     </div>
@@ -40,7 +44,7 @@
       <table class="list" id="tbl">
         <thead><tr>
           <th>File</th><th>Rule-based</th><th>Score</th>
-          <th>AI analyst</th><th>When</th>
+          <th>AI analyst</th><th>When</th><th class="admin-col" style="display:none"></th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -53,6 +57,36 @@
 </div>
 
 <script>
+/* ---- session (shared by every console page) -----------------------------
+   * any 401 from the API sends the browser to /login and back here after;
+   * POST() adds the CSRF header to JSON requests;
+   * loadMe() fills the user box and shows "Settings" to admins.          */
+const _fetch = window.fetch.bind(window);
+window.fetch = async (url, opts) => {
+  const r = await _fetch(url, opts);
+  if (r.status === 401) location.href = "/login?next=" +
+      encodeURIComponent(location.pathname + location.search);
+  return r;
+};
+const POST = (url, body) => fetch(url, {method: "POST",
+  headers: {"Content-Type": "application/json", "X-PhishHunter-Request": "1"},
+  body: JSON.stringify(body || {})});
+let ME = null;
+async function loadMe() {
+  const r = await fetch("/api/me");
+  if (!r.ok) return null;
+  ME = await r.json();
+  document.getElementById("me-name").textContent =
+      `${ME.username} · ${ME.role === "admin" ? "admin" : "read-only"}`;
+  if (ME.role === "admin" && !ME.must_change)
+      document.getElementById("nav-settings").style.display = "";
+  return ME;
+}
+const ME_READY = loadMe();
+document.getElementById("logout").onclick = async () => {
+  await POST("/api/logout"); location.href = "/login"; };
+
+/* ---- page --------------------------------------------------------------- */
 /* HTML-escape every value that comes from the API before it reaches
    innerHTML: stage errors, file names and AI output can carry text an
    attacker controls (e.g. through prompt injection). */
@@ -105,6 +139,23 @@ async function load() {
       <td style="color:var(--muted)">${fmtTime(row.created_utc)}</td>`;
     tr.onclick = () => location.href =
         row.status === "running" ? `/analyze?id=${row.id}` : `/report/${row.id}`;
+    // Admins can delete a finished analysis (email, report and log).
+    if (ME && ME.role === "admin") {
+      const td = document.createElement("td");
+      if (row.status !== "running") {
+        const b = document.createElement("button");
+        b.className = "btn small danger"; b.textContent = "Delete";
+        b.onclick = async ev => {
+          ev.stopPropagation();          // do not open the report
+          if (!confirm(`Delete the analysis of ${row.filename}?`)) return;
+          const r = await POST(`/api/analysis/${row.id}/delete`);
+          if (r.ok) load();
+          else alert((await r.json().catch(() => ({}))).error || "Delete failed.");
+        };
+        td.appendChild(b);
+      }
+      tr.appendChild(td);
+    }
     tbody.appendChild(tr);
   }
 }
@@ -133,7 +184,11 @@ if (preset) {
   }
 }
 
-load();
+ME_READY.then(me => {
+  if (me && me.role === "admin")
+    document.querySelectorAll(".admin-col").forEach(e => e.style.display = "");
+  load();
+});
 setInterval(load, 8000);   /* keep running rows fresh */
 </script>
 </body>

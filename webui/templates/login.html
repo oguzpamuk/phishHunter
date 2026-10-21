@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phishHunter — Log in</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="auth-wrap">
+  <div class="card auth-card">
+    <div class="brand"><span class="fish">phish</span>Hunter</div>
+    <form class="form" id="login-form" autocomplete="on">
+      <label>Username
+        <input type="text" id="username" autocomplete="username" required autofocus>
+      </label>
+      <label>Password
+        <input type="password" id="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn" type="submit" id="go">Log in</button>
+      <div class="msg err" id="msg" role="alert"></div>
+    </form>
+    <p class="help">First start: the one-time password for <span class="mono">admin</span>
+      is printed in the console where the server was started.
+      Forgotten: <span class="mono">python3 webui/app.py --reset-admin</span></p>
+  </div>
+</div>
+<script>
+/* Login page. POST /api/login with the custom CSRF header; on success the
+   server sets the HttpOnly session cookie. A temporary password sends the
+   user to /account first. "next" is only followed when it is a local path. */
+const $ = id => document.getElementById(id);
+function safeNext() {
+  const n = new URLSearchParams(location.search).get("next") || "/";
+  return (n.startsWith("/") && !n.startsWith("//") && !n.startsWith("/\\")) ? n : "/";
+}
+$("login-form").onsubmit = async e => {
+  e.preventDefault();
+  $("go").disabled = true; $("msg").textContent = "";
+  try {
+    const r = await fetch("/api/login", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-PhishHunter-Request": "1"},
+      body: JSON.stringify({username: $("username").value, password: $("password").value})});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { $("msg").textContent = j.error || "Login failed."; $("password").value = ""; return; }
+    location.href = j.must_change ? "/account" : safeNext();
+  } finally { $("go").disabled = false; }
+};
+</script>
+</body>
+</html>

@@ -13,8 +13,12 @@
     <a class="item" href="/"><span class="dot"></span>Dashboard</a>
     <a class="item" href="/analyze"><span class="dot"></span>New analysis</a>
     <a class="item" href="/history"><span class="dot"></span>History</a>
+    <a class="item" href="/settings" id="nav-settings" style="display:none"><span class="dot"></span>Settings</a>
     <div class="spacer"></div>
-    <div class="foot">local console · v1.0</div>
+    <div class="userbox">
+      <div class="who" id="me-name"></div>
+      <div class="links"><a href="/account">Password</a><button class="linkbtn" id="logout">Log out</button></div>
+    </div>
   </nav>
 
   <main class="main">
@@ -28,6 +32,36 @@
 </div>
 
 <script>
+/* ---- session (shared by every console page) -----------------------------
+   * any 401 from the API sends the browser to /login and back here after;
+   * POST() adds the CSRF header to JSON requests;
+   * loadMe() fills the user box and shows "Settings" to admins.          */
+const _fetch = window.fetch.bind(window);
+window.fetch = async (url, opts) => {
+  const r = await _fetch(url, opts);
+  if (r.status === 401) location.href = "/login?next=" +
+      encodeURIComponent(location.pathname + location.search);
+  return r;
+};
+const POST = (url, body) => fetch(url, {method: "POST",
+  headers: {"Content-Type": "application/json", "X-PhishHunter-Request": "1"},
+  body: JSON.stringify(body || {})});
+let ME = null;
+async function loadMe() {
+  const r = await fetch("/api/me");
+  if (!r.ok) return null;
+  ME = await r.json();
+  document.getElementById("me-name").textContent =
+      `${ME.username} · ${ME.role === "admin" ? "admin" : "read-only"}`;
+  if (ME.role === "admin" && !ME.must_change)
+      document.getElementById("nav-settings").style.display = "";
+  return ME;
+}
+const ME_READY = loadMe();
+document.getElementById("logout").onclick = async () => {
+  await POST("/api/logout"); location.href = "/login"; };
+
+/* ---- page --------------------------------------------------------------- */
 /* Report renderer.
    Fetches /api/analysis/{id}/report (the pipeline's full JSON) and renders
    the same evidence sections as the PDF report: verdict banner, email
@@ -92,6 +126,11 @@ async function render() {
                   AI analyst did not run — re-analyze with the AI option to get
                   a second opinion on this verdict.</p>`;
   }
+  // Read-only users receive a redacted report from the server; say so, so
+  // "[hidden]" values and masked addresses are not mistaken for parser bugs.
+  if (rep.redacted) {
+    banners = `<div class="notice"><b>Read-only view.</b> ${esc(rep.redacted.note)}</div>` + banners;
+  }
   document.getElementById("banner").innerHTML = banners;
 
   const parts = [];
@@ -100,7 +139,7 @@ async function render() {
   parts.push(card(sec("Email summary") + kv([
     ["Subject", esc(em.subject)],
     ["From", esc(`${em.from?.name || ""} <${em.from?.email || ""}>`)],
-    ["To", esc((em.to || []).map(t => t.email).join(", "))],
+    ["To", rep.redacted ? "[hidden]" : esc((em.to || []).map(t => t.email).join(", "))],
     ["Date", esc(em.date)],
     ["Attachments", esc((em.attachment_names || []).join(", ") || "none")],
   ])));
